@@ -1,0 +1,141 @@
+{% extends "frontend/base.html" %}
+{% block title %}Report - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title" id="rep-title">Report</h2>
+  <p class="page-subtitle" id="rep-desc">Loading…</p>
+  <div id="report-wrap"><p class="muted">Loading…</p></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN", "ACCOUNTS"]);
+  const KEY = new URLSearchParams(location.search).get("key") || "";
+  renderShell(`report-${KEY}`, "Report");
+
+  function renderFor(c) {
+    if (c.type === "money") return r => fmtMoney(r[c.key]);
+    if (c.type === "badge") return r => badge(String(r[c.key] ?? "—"));
+    if (c.type === "pct") return r => (r[c.key] == null ? "—" : r[c.key] + "%");
+    if (c.type === "operator") return r => (r.id
+      ? el("button", { class: "link-btn", type: "button", onclick: () => showOperatorReport(r.id, r[c.key]) }, r[c.key])
+      : String(r[c.key] ?? "—"));
+    return undefined;
+  }
+
+  function showMeasurements(r) {
+    const rows = r.measurements || [];
+    const wrap = el("div", {});
+    if (r.image_url) wrap.appendChild(el("img", { src: r.image_url, alt: r.name,
+      style: "width:100%;max-height:260px;object-fit:contain;border-radius:10px;background:#faf7f5;margin-bottom:0.8rem;" }));
+    if (!rows.length) {
+      wrap.appendChild(el("p", { class: "muted" }, "No measurement chart recorded for this style."));
+    } else {
+      // Collect every size key that appears, preserving first-seen order.
+      const sizes = [];
+      rows.forEach(row => Object.keys(row.sizes || {}).forEach(s => { if (!sizes.includes(s)) sizes.push(s); }));
+      const table = el("table", { class: "data-table" });
+      table.appendChild(el("thead", {}, [el("tr", {}, [el("th", {}, "Measurement"),
+        ...sizes.map(s => el("th", {}, s))])]));
+      const tb = el("tbody", {});
+      rows.forEach(row => tb.appendChild(el("tr", {}, [el("td", {}, row.param || "—"),
+        ...sizes.map(s => el("td", {}, String((row.sizes || {})[s] ?? "—")))])));
+      table.appendChild(tb);
+      wrap.appendChild(table);
+    }
+    showCrudModal(`${r.code} — ${r.name}`, [wrap], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+  }
+
+  /** Click a report row → the complete record, plus any rich sub-breakdown
+   *  the report attached (row.detail + row.detail_columns). Works for every
+   *  report: party ledger, supplier ledger, purchase bills, P&L, etc. */
+  function fmtCell(v, type) {
+    if (type === "money") return fmtMoney(v);
+    if (type === "pct") return v == null ? "—" : v + "%";
+    return (v === null || v === undefined || v === "") ? "—" : String(v);
+  }
+  function showRowDetail(d, row) {
+    const pairs = d.columns.map(c => [c.label, fmtCell(row[c.key], c.type)]);
+    const nodes = [];
+    if (row.image_url) nodes.push(el("img", { src: row.image_url, alt: row.name || "",
+      style: "width:100%;max-height:220px;object-fit:contain;border-radius:10px;background:#faf7f5;margin-bottom:0.7rem;" }));
+    nodes.push(detailGrid(pairs));
+    if (Array.isArray(row.measurements) && row.measurements.length) {
+      nodes.push(el("div", { class: "section-title" }, "Measurement chart"));
+      const sizes = []; row.measurements.forEach(m => Object.keys(m.sizes || {}).forEach(s => { if (!sizes.includes(s)) sizes.push(s); }));
+      const mt = el("table", { class: "data-table" });
+      mt.appendChild(el("thead", {}, el("tr", {}, [el("th", {}, "Measurement"), ...sizes.map(s => el("th", {}, s))])));
+      mt.appendChild(el("tbody", {}, row.measurements.map(m => el("tr", {}, [el("td", {}, m.param || "—"),
+        ...sizes.map(s => el("td", {}, String((m.sizes || {})[s] ?? "—")))]))));
+      nodes.push(mt);
+    }
+    if (Array.isArray(row.detail) && row.detail.length && Array.isArray(row.detail_columns)) {
+      nodes.push(el("div", { class: "section-title" }, row.detail_title || "Breakdown"));
+      const t = el("table", { class: "data-table" });
+      t.appendChild(el("thead", {}, el("tr", {}, row.detail_columns.map(dc => el("th", {}, dc.label)))));
+      t.appendChild(el("tbody", {}, row.detail.map(dr => el("tr", {}, row.detail_columns.map(dc =>
+        el("td", {}, fmtCell(dr[dc.key], dc.type)))))));
+      nodes.push(t);
+    }
+    showCrudModal(`${d.title} — ${row[d.columns[0].key] ?? ""}`, nodes,
+      [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+  }
+
+  function renderGallery(container, d) {
+    const grid = el("div", { class: "grid grid-4" });
+    d.rows.forEach(r => {
+      const media = r.image_url
+        ? el("img", { src: r.image_url, alt: r.name, loading: "lazy",
+            style: "width:100%;height:150px;object-fit:cover;border-radius:10px 10px 0 0;background:#faf7f5;" })
+        : el("div", { style: "height:150px;display:flex;align-items:center;justify-content:center;font-size:2.4rem;background:#faf7f5;border-radius:10px 10px 0 0;color:#c9bcb5;" }, "\u{1F455}");
+      const body = el("div", { style: "padding:0.7rem 0.8rem;" }, [
+        el("div", { style: "font-weight:700;" }, r.code || "—"),
+        el("div", { style: "color:#6b6b6b;margin:0.15rem 0 0.4rem;" }, r.name || ""),
+        el("div", { class: "label" }, `${r.orders} order(s) · ${r.produced} produced`),
+        el("div", { style: "display:flex;align-items:center;justify-content:space-between;margin-top:0.5rem;" }, [
+          badge(r.status),
+          el("button", { class: "link-btn", type: "button", onclick: () => showMeasurements(r) }, "Measurements"),
+        ]),
+      ]);
+      grid.appendChild(el("div", { class: "card", style: "padding:0;overflow:hidden;" }, [media, body]));
+    });
+    container.appendChild(grid);
+  }
+
+  async function load() {
+    const wrap = document.getElementById("report-wrap");
+    let d;
+    try { d = await apiGet(`/accounts/report/?key=${encodeURIComponent(KEY)}`); }
+    catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load report: ${e.message}</p>`; return; }
+
+    document.getElementById("rep-title").textContent = d.title;
+    document.getElementById("rep-desc").textContent = d.description || "";
+    const tb = document.getElementById("topbar-title"); if (tb) tb.textContent = d.title;
+    wrap.innerHTML = "";
+
+    if (d.summary && d.summary.length) {
+      wrap.appendChild(el("div", { class: "grid grid-4" }, d.summary.map(s =>
+        el("div", { class: `card stat ${s.kind ? "stat-" + s.kind : ""}` }, [
+          el("div", { class: "value" }, s.money ? fmtMoney(s.value) : String(s.value)),
+          el("div", { class: "label" }, s.label),
+        ]))));
+    }
+
+    if (d.layout === "cards" || d.layout === "gallery") { renderGallery(wrap, d); return; }
+
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [body]));
+    const columns = d.columns.map(c => ({
+      label: c.label, key: c.key,
+      value: r => (c.type === "money" || c.type === "pct" ? Number(r[c.key]) : r[c.key]),
+      render: renderFor(c),
+    }));
+    // Every report row is clickable for the complete record + breakdown.
+    columns.push({ label: "", sortable: false, render: r => el("button", { class: "secondary", type: "button", onclick: () => showRowDetail(d, r) }, "Details") });
+    dataTable(body, {
+      columns, rows: d.rows || [], pageSize: 15,
+      searchPlaceholder: "Search…", emptyText: "No records.",
+    });
+  }
+  load();
+</script>
+{% endblock %}

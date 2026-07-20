@@ -1,0 +1,159 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in - Subha Apparels</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'css/style.css' %}?v=20260748">
+</head>
+<body>
+  <div class="login-wrap">
+    <!-- Left: brand story + floating preview chips -->
+    <div class="login-hero">
+      <div class="hero-brand">
+        <svg viewBox="0 0 48 45" width="34" height="32" aria-hidden="true" style="flex-shrink:0;">
+          <rect width="48" height="45" rx="10" fill="rgba(255,255,255,0.15)"/>
+          <path d="M14 11 H34 V16 H20 V20 H34 V34 H14 V29 H28 V25 H14 Z" fill="#ffffff"/>
+        </svg>
+        <span>SUBHA APPARELS</span>
+      </div>
+
+      <div class="hero-body">
+        <span class="hero-eyebrow"><span class="dot"></span> Live factory dashboard</span>
+        <h2>Run your factory floor from <span class="grad">one smart dashboard.</span></h2>
+        <p>From merchandising and cutting to production, finishing and accounts — every department, connected in real time.</p>
+        <div class="hero-features">
+          <div class="hero-feature"><span class="fi">📊</span><span>Live production &amp; efficiency insights</span></div>
+          <div class="hero-feature"><span class="fi">🧵</span><span>End-to-end order tracking, cut to dispatch</span></div>
+          <div class="hero-feature"><span class="fi">💰</span><span>Payments, P&amp;L and stock at a glance</span></div>
+        </div>
+      </div>
+
+      <div class="hero-foot">
+        <div class="stat-mini"><strong>8</strong> departments</div>
+        <div class="stat-mini"><strong>Real-time</strong> sync</div>
+        <div class="stat-mini"><strong>Secure</strong> access</div>
+      </div>
+
+      <div class="hero-floaties" aria-hidden="true">
+        <div class="floaty f1"><span class="fico">✅</span><span><span class="ftitle">Efficiency</span><span class="fval">94.2%</span></span></div>
+        <div class="floaty f2"><span class="fico">✂️</span><span><span class="ftitle">Bundles cut today</span><span class="fval">1,280</span></span></div>
+        <div class="floaty f3"><span class="fico">🚚</span><span><span class="ftitle">Dispatched</span><span class="fval">36 orders</span></span></div>
+      </div>
+    </div>
+
+    <!-- Right: glass login card -->
+    <div class="login-panel">
+      <div class="login-card">
+        <div class="brand-row">
+          <svg width="46" height="43" viewBox="0 0 48 45" aria-hidden="true">
+            <rect width="48" height="45" rx="11" fill="#1b2330"/>
+            <path d="M14 11 H34 V16 H20 V20 H34 V34 H14 V29 H28 V25 H14 Z" fill="#eef0f4"/>
+          </svg>
+        </div>
+        <h1>Welcome back</h1>
+        <p class="subtitle">Sign in with your work account to open your dashboard.</p>
+
+        <div class="field">
+          <input type="email" id="username" autocomplete="username" placeholder=" ">
+          <label for="username">Email address</label>
+        </div>
+        <div class="field has-icon">
+          <input type="password" id="password" autocomplete="current-password" placeholder=" ">
+          <label for="password">Password</label>
+          <button type="button" class="pw-toggle" id="pw-toggle" aria-label="Show password">👁</button>
+        </div>
+
+        <div class="form-aux">
+          <label><input type="checkbox" id="remember"> Remember me</label>
+          <a href="#" id="forgot-link">Forgot password?</a>
+        </div>
+
+        <button class="login-btn" onclick="doLogin()">Sign in</button>
+        <div id="error" class="error-msg"></div>
+      </div>
+    </div>
+  </div>
+  <script src="{% static 'js/api.js' %}?v=20260748"></script>
+  <script>
+    if (Auth.isLoggedIn()) redirectToOwnDashboard();
+
+    // Remember me: prefill the email that was remembered last time.
+    const rememberBox = document.getElementById("remember");
+    const usernameInput = document.getElementById("username");
+    const rememberedEmail = localStorage.getItem("gms_remember_email");
+    if (rememberedEmail) { usernameInput.value = rememberedEmail; rememberBox.checked = true; }
+
+    // Forgot password — no email gateway, so this notifies an administrator.
+    document.getElementById("forgot-link").addEventListener("click", (e) => { e.preventDefault(); openForgot(); });
+    function openForgot() {
+      const emailI = document.createElement("input");
+      emailI.type = "email"; emailI.placeholder = "you@company.com"; emailI.value = usernameInput.value.trim();
+      emailI.className = ""; emailI.style.cssText = "width:100%;padding:0.7rem 0.85rem;border:1px solid #e0e3ea;border-radius:11px;font-size:0.92rem;font-family:inherit;";
+      const msg = document.createElement("div"); msg.style.cssText = "font-size:0.85rem;margin-top:0.7rem;";
+      const overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.addEventListener("click", (ev) => { if (ev.target === overlay) overlay.remove(); });
+      const card = document.createElement("div");
+      card.className = "modal-card";
+      card.addEventListener("click", (ev) => ev.stopPropagation());
+      card.innerHTML = "<h3>Reset your password</h3><p class='muted' style='margin-top:-0.5rem;'>Enter your work email. An administrator will be notified to set a new password for you.</p>";
+      const label = document.createElement("label"); label.textContent = "Email"; label.style.cssText = "font-size:0.82rem;font-weight:600;display:block;margin-bottom:0.35rem;";
+      card.appendChild(label); card.appendChild(emailI); card.appendChild(msg);
+      const actions = document.createElement("div"); actions.className = "form-inline"; actions.style.marginTop = "1rem";
+      const sendBtn = document.createElement("button"); sendBtn.type = "button"; sendBtn.textContent = "Send Request";
+      const cancelBtn = document.createElement("button"); cancelBtn.type = "button"; cancelBtn.className = "secondary"; cancelBtn.textContent = "Cancel";
+      cancelBtn.onclick = () => overlay.remove();
+      sendBtn.onclick = async () => {
+        const email = emailI.value.trim();
+        if (!email) { msg.style.color = "#fb2c36"; msg.textContent = "Please enter your email."; return; }
+        sendBtn.disabled = true; sendBtn.textContent = "Sending…";
+        try {
+          const res = await fetch(`${API_BASE}/users/forgot-password/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+          const data = await res.json().catch(() => ({}));
+          msg.style.color = "#12a150";
+          msg.textContent = data.detail || "Request sent. An administrator will reset your password shortly.";
+          sendBtn.textContent = "Sent ✓";
+          setTimeout(() => overlay.remove(), 2600);
+        } catch (err) { msg.style.color = "#fb2c36"; msg.textContent = "Could not send request. Try again."; sendBtn.disabled = false; sendBtn.textContent = "Send Request"; }
+      };
+      actions.appendChild(sendBtn); actions.appendChild(cancelBtn); card.appendChild(actions);
+      overlay.appendChild(card); document.body.appendChild(overlay); emailI.focus();
+    }
+
+    const pwInput = document.getElementById("password");
+    const pwToggle = document.getElementById("pw-toggle");
+    pwToggle.addEventListener("click", () => {
+      const show = pwInput.type === "password";
+      pwInput.type = show ? "text" : "password";
+      pwToggle.textContent = show ? "🙈" : "👁";
+      pwInput.focus();
+    });
+
+    pwInput.addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+    document.getElementById("username").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+
+    async function doLogin() {
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      const errorBox = document.getElementById("error");
+      const btn = document.querySelector(".login-btn");
+      errorBox.textContent = "";
+      if (!username || !password) { errorBox.textContent = "Enter your username and password."; return; }
+      btn.disabled = true; btn.textContent = "Signing in…";
+      try {
+        await login(username, password);
+        if (rememberBox.checked) localStorage.setItem("gms_remember_email", username);
+        else localStorage.removeItem("gms_remember_email");
+        redirectToOwnDashboard();
+      } catch (e) {
+        errorBox.textContent = e.message;
+        btn.disabled = false; btn.textContent = "Sign in";
+      }
+    }
+  </script>
+</body>
+</html>

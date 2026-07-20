@@ -1,0 +1,126 @@
+{% extends "frontend/base.html" %}
+{% block title %}Processing - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Processing Departments</h2>
+  <p class="page-subtitle">Everything sent out to Finishing, Washing, Printing and Embroidery — what's out, what's come back, and the loss at each. Receive pieces back as each department finishes.</p>
+
+  <div id="tabs"></div>
+  <div id="summary-cards"></div>
+  <div id="table-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["PRODUCTION_SUPERVISOR", "FINISHING_SUPERVISOR"]);
+  renderShell("production-processing", "Processing");
+
+  const DEPARTMENTS = ["FINISHING", "WASHING", "PRINTING", "EMBROIDERY"];
+  const deptLabel = d => d[0] + d.slice(1).toLowerCase();
+  let ALL = [];
+  let activeDept = "ALL";
+
+  function renderTabs() {
+    const wrap = document.getElementById("tabs");
+    wrap.innerHTML = "";
+    const tabs = el("div", { class: "tabs" }, ["ALL", ...DEPARTMENTS].map(d =>
+      el("button", { type: "button", class: activeDept === d ? "active" : "", onclick: () => { activeDept = d; render(); } },
+        d === "ALL" ? "All" : deptLabel(d))));
+    wrap.appendChild(tabs);
+  }
+
+  function renderSummary() {
+    const wrap = document.getElementById("summary-cards");
+    wrap.innerHTML = "";
+    const rows = (activeDept === "ALL" ? DEPARTMENTS : [activeDept]).map(d => {
+      const items = ALL.filter(x => x.department === d);
+      const sent = items.reduce((s, x) => s + x.quantity_sent, 0);
+      const recv = items.reduce((s, x) => s + (x.quantity_received || 0), 0);
+      const out = items.filter(x => x.status === "SENT").length;
+      const loss = items.reduce((s, x) => s + x.loss_quantity, 0);
+      return el("div", { class: "card stat" }, [
+        el("div", { class: "value" }, String(sent)),
+        el("div", { class: "label" }, `${deptLabel(d)} — sent · ${recv} back · ${out} out · ${loss} lost`),
+      ]);
+    });
+    wrap.appendChild(el("div", { class: "grid grid-4" }, rows));
+  }
+
+  async function receiveBack(pd) {
+    const q = await showPrompt({ title: `Receive back — ${pd.department_display}`,
+      message: `Order ${pd.order_number} · sent ${pd.quantity_sent}`, label: "Pieces received back",
+      number: true, min: 0, max: pd.quantity_sent, value: pd.quantity_sent, confirmText: "Continue" });
+    if (q === null || q === "") return;
+    const body = { quantity_received: Number(q) };
+    if (Number(q) < pd.quantity_sent) {
+      const reason = await showPrompt({ title: "Shortfall — reason required",
+        message: `${pd.quantity_sent - Number(q)} piece(s) short. This is held until an Admin approves the reason.`,
+        label: "Reason for the shortfall", multiline: true, required: true, confirmText: "Submit for approval" });
+      if (!reason) { notify.warning("A reason is required when fewer pieces come back than were sent."); return; }
+      body.loss_reason = reason;
+    }
+    try {
+      const r = await apiPost(`/production/process-dispatches/${pd.id}/receive/`, body);
+      notify.success(r.status === "PENDING_APPROVAL" ? "Received — shortage sent for Admin approval." : "Received back.");
+      await refresh();
+    } catch (e) { notify.error(e.message); }
+  }
+
+  async function reviewLoss(pd, approved) {
+    const notes = await showPrompt({ title: approved ? "Approve shortfall" : "Reject shortfall",
+      message: `Reason: ${pd.loss_reason || "—"}`, label: approved ? "Notes (optional)" : "Why are you rejecting? (Production must re-count)",
+      multiline: true, required: !approved, confirmText: approved ? "Approve" : "Reject", tone: approved ? "brand" : "danger" });
+    if (notes === null) return;
+    try { await apiPost(`/production/process-dispatches/${pd.id}/approve_loss/`, { approved, notes }); notify.success(approved ? "Shortage approved." : "Rejected — re-open."); await refresh(); }
+    catch (e) { notify.error(e.message); }
+  }
+
+  function dispatchActions(r) {
+    if (r.status === "SENT") return el("button", { type: "button", onclick: () => receiveBack(r) }, "Receive Back");
+    if (r.status === "PENDING_APPROVAL") {
+      const info = el("div", {}, [el("div", { class: "muted", style: "font-size:0.8rem;margin-bottom:0.2rem;" }, `Reason: ${r.loss_reason || "—"}`)]);
+      if (Auth.getRole() === "ADMIN") {
+        info.appendChild(el("div", { class: "form-inline" }, [
+          el("button", { type: "button", onclick: () => reviewLoss(r, true) }, "Approve"),
+          el("button", { class: "secondary", type: "button", onclick: () => reviewLoss(r, false) }, "Reject"),
+        ]));
+      } else {
+        info.appendChild(el("span", { class: "muted" }, "Awaiting Admin approval"));
+      }
+      return info;
+    }
+    return "—";
+  }
+
+  function render() {
+    renderTabs();
+    renderSummary();
+    const wrap = document.getElementById("table-wrap");
+    wrap.innerHTML = "";
+    const rows = activeDept === "ALL" ? ALL : ALL.filter(x => x.department === activeDept);
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, activeDept === "ALL" ? "All Process Dispatches" : `${deptLabel(activeDept)} Work`), body]));
+    dataTable(body, {
+      columns: [
+        { label: "Dispatch #", key: "dispatch_number" },
+        { label: "Order", key: "order_number" },
+        { label: "Company", value: r => r.party_name || "", render: r => r.party_name || "—" },
+        { label: "Department", key: "department_display" },
+        { label: "Sent", key: "quantity_sent", value: r => Number(r.quantity_sent) },
+        { label: "Sent Date", key: "sent_date", render: r => r.sent_date || "—" },
+        { label: "Received", value: r => (r.quantity_received == null ? -1 : r.quantity_received), render: r => (r.quantity_received == null ? "—" : String(r.quantity_received)) },
+        { label: "Recv Date", key: "received_date", render: r => r.received_date || "—" },
+        { label: "Loss", value: r => Number(r.loss_quantity), render: r => (r.loss_quantity > 0 ? el("span", { style: "color:var(--danger);font-weight:600;" }, String(r.loss_quantity)) : "0") },
+        { label: "Status", key: "status", render: r => badge(r.status) },
+        { label: "Actions", sortable: false, render: r => dispatchActions(r) },
+      ], rows, pageSize: 12, initialSort: { key: "dispatch_number", dir: "desc" },
+      searchPlaceholder: "Search — order, company, department…", emptyText: "Nothing sent to this department yet.",
+    });
+  }
+
+  async function refresh() {
+    ALL = await fetchAll("/production/process-dispatches/");
+    render();
+  }
+  refresh();
+</script>
+{% endblock %}

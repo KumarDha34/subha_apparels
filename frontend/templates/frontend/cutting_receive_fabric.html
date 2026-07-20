@@ -1,0 +1,76 @@
+{% extends "frontend/base.html" %}
+{% block title %}Receive Fabric - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Receive Fabric</h2>
+  <p class="page-subtitle">Confirm physical receipt of fabric issued by Store, before cutting begins.</p>
+
+  <div id="awaiting-wrap"></div>
+  <div id="history-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["CUTTING_SUPERVISOR"]);
+  renderShell("cutting-receive-fabric", "Receive Fabric");
+
+  function rowLabel(c) {
+    return `${c.fabric_type_name || "?"} / ${c.color_name || "?"} — ${c.fabric_issued_quantity}`;
+  }
+
+  async function receive(c) {
+    try {
+      await apiPost(`/cutting/cutting-orders/${c.id}/receive/`, {});
+      await refresh();
+    } catch (e) { alert("Error: " + e.message); }
+  }
+
+  async function refresh() {
+    const awaitingWrap = document.getElementById("awaiting-wrap");
+    const historyWrap = document.getElementById("history-wrap");
+    awaitingWrap.innerHTML = "Loading...";
+    historyWrap.innerHTML = "";
+    try {
+      const [awaiting, received] = await Promise.all([
+        fetchAll("/cutting/cutting-orders/?status=FABRIC_ISSUED"),
+        fetchAll("/cutting/cutting-orders/?status=RECEIVED"),
+      ]);
+
+      awaitingWrap.innerHTML = "";
+      const awBody = el("div", {});
+      awaitingWrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Awaiting Receipt"), awBody]));
+      if (!awaiting.length) {
+        awBody.appendChild(el("p", { class: "muted" }, "Nothing awaiting receipt right now."));
+      } else {
+        dataTable(awBody, {
+          columns: [
+            { label: "Cutting #", key: "cutting_number" }, { label: "Order", key: "order_number", render: c => c.order_number || badge("No Order") },
+            { label: "Fabric / Color", value: c => rowLabel(c), render: c => rowLabel(c) },
+            { label: "Quantity", key: "fabric_issued_quantity", value: c => Number(c.fabric_issued_quantity) },
+            { label: "Issued", key: "created_at", render: c => (c.created_at ? c.created_at.slice(0, 10) : "—") },
+            { label: "", sortable: false, render: c => el("button", { type: "button", onclick: () => receive(c) }, "Receive") },
+          ], rows: awaiting, pageSize: 10, searchPlaceholder: "Search — cutting #, order, fabric…",
+        });
+      }
+
+      historyWrap.innerHTML = "";
+      if (received.length) {
+        const hBody = el("div", {});
+        historyWrap.appendChild(el("div", { class: "card" }, [
+          el("h3", {}, "Received — Ready to Start Cutting"), hBody,
+          el("p", { class: "muted" }, "Continue from Record Cut →"),
+        ]));
+        dataTable(hBody, {
+          columns: [
+            { label: "Cutting #", key: "cutting_number" }, { label: "Order", key: "order_number", render: c => c.order_number || badge("No Order") },
+            { label: "Fabric / Color", value: c => rowLabel(c), render: c => rowLabel(c) },
+            { label: "Quantity", key: "fabric_issued_quantity", value: c => Number(c.fabric_issued_quantity) },
+            { label: "Received At", key: "received_at", render: c => (c.received_at ? c.received_at.slice(0, 10) : "—") },
+          ], rows: received, pageSize: 10, searchPlaceholder: "Search received…",
+        });
+      }
+    } catch (e) { awaitingWrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  refresh();
+</script>
+{% endblock %}

@@ -1,0 +1,47 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Subha Apparels{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'css/style.css' %}?v=20260748">
+  <script>try{var t=localStorage.getItem("gms_theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
+</head>
+<body>
+  <div class="app-shell" id="app-shell">
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+    <aside class="sidebar">
+      <div class="brand">
+        <svg class="brand-logo" viewBox="0 0 48 45" width="34" height="32" aria-hidden="true">
+          <rect width="48" height="45" rx="10" fill="#1b2330"/>
+          <path d="M14 11 H34 V16 H20 V20 H34 V34 H14 V29 H28 V25 H14 Z" fill="#eef0f4"/>
+        </svg>
+        <span class="brand-name"><b>SUBHA</b><i>APPARELS</i></span>
+      </div>
+      <nav id="sidebar-nav"></nav>
+    </aside>
+    <div class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle menu">☰</button>
+          <h1 id="topbar-title"></h1>
+        </div>
+        <div class="topbar-right">
+          <button class="theme-toggle" id="theme-toggle" type="button" title="Toggle dark / light mode" aria-label="Toggle theme">🌙</button>
+          <div class="notification-bell" id="notification-bell"></div>
+          <div class="user-info" id="user-info"></div>
+        </div>
+      </header>
+      <div class="content">
+        {% block content %}{% endblock %}
+      </div>
+    </div>
+  </div>
+  <script src="{% static 'js/api.js' %}?v=20260748"></script>
+  <script src="{% static 'js/crud.js' %}?v=20260748"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,167 @@
+{% extends "frontend/base.html" %}
+{% block title %}Payments - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Payments</h2>
+  <p class="page-subtitle">Invoices generated from receiving fabric/accessory purchases — record payments and track what's still owed.</p>
+
+  <div id="filters"></div>
+  <div id="invoices-table-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ACCOUNTS"]);
+  renderShell("accounts-payments", "Payments");
+
+  let INVOICES = [];
+  const filters = { payment_status: "" };
+
+  function isOverdue(inv) {
+    return inv.due_date && inv.payment_status !== "PAID" && new Date(inv.due_date) < new Date(new Date().toDateString());
+  }
+
+  function renderFilters() {
+    const wrap = document.getElementById("filters");
+    wrap.innerHTML = "";
+    wrap.appendChild(el("div", { class: "card" }, [
+      field("Status", selectEl({ onchange: e => { filters.payment_status = e.target.value; refresh(); } }, [
+        { value: "UNPAID", label: "Unpaid" }, { value: "PARTIALLY_PAID", label: "Partially Paid" }, { value: "PAID", label: "Paid" },
+      ], filters.payment_status, "All statuses")),
+    ]));
+  }
+
+  async function refresh() {
+    const params = new URLSearchParams();
+    if (filters.payment_status) params.set("payment_status", filters.payment_status);
+    const qs = params.toString();
+    INVOICES = await fetchAll(`/accounts/invoices/${qs ? "?" + qs : ""}`);
+    renderTable();
+  }
+
+  function renderTable() {
+    const wrap = document.getElementById("invoices-table-wrap");
+    wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Invoices"), body]));
+    dataTable(body, {
+      columns: [
+        { label: "Invoice #", key: "invoice_number" },
+        { label: "PO #", value: inv => inv.po_number || "", render: inv => inv.po_number || "—" },
+        { label: "Vendor", value: inv => inv.vendor_name || "", render: inv => inv.vendor_name || "—" },
+        { label: "Total", value: inv => Number(inv.total_amount), render: inv => fmtMoney(inv.total_amount) },
+        { label: "Paid", value: inv => Number(inv.paid_amount), render: inv => fmtMoney(inv.paid_amount) },
+        { label: "Due", value: inv => Number(inv.due_amount), render: inv => fmtMoney(inv.due_amount) },
+        { label: "Status", value: inv => inv.payment_status + (isOverdue(inv) ? " overdue" : ""),
+          render: inv => el("span", {}, [badge(inv.payment_status), isOverdue(inv) ? el("span", { class: "badge overdue", style: "margin-left:0.4rem;" }, "OVERDUE") : null]) },
+        { label: "Actions", sortable: false, render: inv => {
+            const actions = [el("button", { class: "secondary", type: "button", onclick: () => viewInvoice(inv) }, "View")];
+            if (inv.payment_status !== "PAID") actions.push(el("button", { type: "button", onclick: () => openPayModal(inv) }, "Record Payment"));
+            actions.push(el("button", { class: "secondary", type: "button", onclick: () => openAddCostModal(inv) }, "Add Cost"));
+            return el("div", { class: "form-inline" }, actions);
+          } },
+      ], rows: INVOICES, pageSize: 12, initialSort: { key: "invoice_number", dir: "desc" },
+      searchPlaceholder: "Search invoices — number, PO, vendor, status…",
+      emptyText: "No invoices yet — generated automatically once Store starts receiving a purchase order.",
+    });
+  }
+
+  function renderPaymentHistory(records) {
+    if (!records.length) return el("p", { class: "muted" }, "No payments recorded yet.");
+    const sorted = [...records].sort((a, b) => a.id - b.id);
+    let prevCumulative = 0;
+    const table = el("table");
+    table.appendChild(el("thead", {}, el("tr", {}, ["Date", "Amount Paid", "Method", "Running Total", "Notes"].map(h => el("th", {}, h)))));
+    const tbody = el("tbody");
+    sorted.forEach(r => {
+      const installment = Number(r.paid_amount) - prevCumulative;
+      prevCumulative = Number(r.paid_amount);
+      tbody.appendChild(el("tr", {}, [
+        el("td", {}, r.payment_date), el("td", {}, fmtMoney(installment)),
+        el("td", {}, r.payment_method || "—"), el("td", {}, fmtMoney(r.paid_amount)), el("td", {}, r.notes || "—"),
+      ]));
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  async function viewInvoice(inv) {
+    const historyBox = el("div", { class: "muted" }, "Loading payment history...");
+    const costsText = inv.additional_costs && Object.keys(inv.additional_costs).length
+      ? Object.entries(inv.additional_costs).map(([k, v]) => `${k}: ${fmtMoney(v)}`).join(", ")
+      : "—";
+    showCrudModal(`💳 ${inv.invoice_number}`, [
+      detailGrid([
+        ["Purchase Order", inv.po_number || "—"], ["Vendor", inv.vendor_name || "—"],
+        ["Invoice Date", inv.invoice_date], ["Due Date", inv.due_date || "—"],
+        ["Subtotal", fmtMoney(inv.subtotal)], ["Tax", fmtMoney(inv.tax_amount)],
+        ["Additional Costs", costsText], ["Total", fmtMoney(inv.total_amount)],
+        ["Paid", fmtMoney(inv.paid_amount)], ["Due", fmtMoney(inv.due_amount)],
+        ["Status", badge(inv.payment_status)],
+      ]),
+      el("div", { class: "section-title" }, "Payment History"),
+      historyBox,
+    ], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+
+    try {
+      const records = await fetchAll(`/accounts/payments/?invoice=${inv.id}`);
+      historyBox.innerHTML = "";
+      historyBox.appendChild(renderPaymentHistory(records));
+    } catch (e) { historyBox.textContent = "Could not load payment history: " + e.message; }
+  }
+
+  function openPayModal(inv) {
+    const amountInput = el("input", { type: "number", step: "0.01", min: "0.01", max: String(inv.due_amount), placeholder: `up to ${fmtMoney(inv.due_amount)}` });
+    const methodSelect = el("select", {}, ["CASH", "BANK_TRANSFER", "CHEQUE", "ONLINE"].map(m => el("option", { value: m }, m.replace("_", " "))));
+    const dateInput = el("input", { type: "date", class: "allow-past", value: new Date().toISOString().slice(0, 10) });
+    const notesInput = el("textarea", {});
+    const errorBox = el("div", { class: "error-msg", style: "display:none;" });
+
+    const submit = async () => {
+      if (!amountInput.value || Number(amountInput.value) <= 0) { errorBox.textContent = "Enter a payment amount."; errorBox.style.display = "block"; return; }
+      try {
+        await apiPost(`/accounts/invoices/${inv.id}/pay/`, {
+          amount: Number(amountInput.value), payment_method: methodSelect.value, payment_date: dateInput.value, notes: notesInput.value,
+        });
+        closeCrudModal();
+        await refresh();
+      } catch (e) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+    };
+    showCrudModal(`Record Payment — ${inv.invoice_number}`, [
+      errorBox,
+      el("p", { class: "muted", style: "margin-top:-0.5rem;" }, `Total ${fmtMoney(inv.total_amount)} · Paid so far ${fmtMoney(inv.paid_amount)} · Due ${fmtMoney(inv.due_amount)}`),
+      field("Amount", amountInput),
+      field("Payment Method", methodSelect),
+      field("Payment Date", dateInput),
+      field("Notes", notesInput),
+    ], [
+      el("button", { type: "button", onclick: submit }, "Record Payment"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  function openAddCostModal(inv) {
+    const keySelect = el("select", {}, ["transportation", "customs", "documentation", "other"].map(k => el("option", { value: k }, k)));
+    const amountInput = el("input", { type: "number", step: "0.01", min: "0" });
+    const errorBox = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      if (!amountInput.value) { errorBox.textContent = "Amount is required."; errorBox.style.display = "block"; return; }
+      try {
+        await apiPost(`/accounts/invoices/${inv.id}/add-cost/`, { key: keySelect.value, amount: Number(amountInput.value) });
+        closeCrudModal();
+        await refresh();
+      } catch (e) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+    };
+    showCrudModal(`Add Cost — ${inv.invoice_number}`, [
+      errorBox, field("Cost Type", keySelect), field("Amount", amountInput),
+    ], [
+      el("button", { type: "button", onclick: submit }, "Add Cost"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  (async function init() {
+    renderFilters();
+    await refresh();
+  })();
+</script>
+{% endblock %}

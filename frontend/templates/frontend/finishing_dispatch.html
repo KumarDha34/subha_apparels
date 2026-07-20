@@ -1,0 +1,114 @@
+{% extends "frontend/base.html" %}
+{% block title %}Dispatch - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Dispatch</h2>
+  <p class="page-subtitle">Pick a finished order, check the final quantity you have, enter how many to dispatch — that's it. Print a Packing List or Challan for each shipment.</p>
+
+  <div id="dispatch-form"></div>
+  <div id="dispatch-list"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["FINISHING_SUPERVISOR"]);
+  renderShell("finishing-dispatch", "Dispatch");
+
+  let ORDERS = [];
+  let state = { order: "", quantity: "", finalQty: null };
+
+  function openPrintWindow(title, bodyHtml) {
+    const win = window.open("", "_blank", "width=800,height=900");
+    win.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>
+      body{font-family:Arial,sans-serif;padding:2rem;color:#111;} h1{font-size:1.4rem;margin-bottom:.2rem;}
+      h2{font-size:1rem;color:#555;margin-top:0;font-weight:normal;} table{width:100%;border-collapse:collapse;margin-top:1.5rem;}
+      th,td{border:1px solid #999;padding:.5rem .75rem;text-align:left;} th{background:#f0f0f0;}
+      .sign{margin-top:3rem;display:grid;grid-template-columns:1fr 1fr;gap:2rem;} .sign div{border-top:1px solid #333;padding-top:.3rem;margin-top:2.5rem;}
+      </style></head><body>${bodyHtml}<script>window.onload=()=>window.print();<\/script></body></html>`);
+    win.document.close();
+  }
+
+  async function finalQuantityFor(orderId) {
+    // "Final quantity we have" = pieces that passed the Finishing QC.
+    const qcs = await fetchAll(`/finishing/quality-checks/?order=${orderId}`).catch(() => []);
+    return qcs.reduce((s, q) => s + (q.quantity_passed || 0), 0);
+  }
+
+  async function renderForm() {
+    const wrap = document.getElementById("dispatch-form");
+    wrap.innerHTML = "";
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const finalLine = el("div", { class: "mode-banner mode-fixed", style: state.order ? "" : "display:none;" });
+    const qtyInput = numberInput(state.quantity, v => state.quantity = v, { min: "0", step: "1", placeholder: "pieces to dispatch" });
+
+    async function onOrder(id) {
+      state.order = id; state.finalQty = null; state.quantity = "";
+      if (id) {
+        state.finalQty = await finalQuantityFor(id);
+        finalLine.style.display = "";
+        finalLine.innerHTML = "";
+        finalLine.append(el("strong", {}, "Final available: "), `${state.finalQty} pieces passed QC — enter how many to dispatch.`);
+        state.quantity = String(state.finalQty);
+        qtyInput.value = state.quantity;
+      } else { finalLine.style.display = "none"; }
+    }
+
+    const form = el("div", { class: "form-inline" }, [
+      field("Order (finished)", selectEl({ onchange: e => onOrder(e.target.value) },
+        ORDERS.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "Select order")),
+      field("Quantity to Dispatch", qtyInput),
+    ]);
+    const submit = async () => {
+      err.style.display = "none";
+      if (!state.order) { err.textContent = "Select an order."; err.style.display = "block"; return; }
+      if (!state.quantity || Number(state.quantity) <= 0) { err.textContent = "Enter a quantity to dispatch."; err.style.display = "block"; return; }
+      if (state.finalQty != null && Number(state.quantity) > state.finalQty) { err.textContent = `Only ${state.finalQty} pieces are available (passed QC).`; err.style.display = "block"; return; }
+      try {
+        await apiPost("/finishing/dispatch/", { order: Number(state.order), quantity_dispatched: Number(state.quantity), status: "DISPATCHED", dispatch_date: new Date().toISOString().slice(0, 10) });
+        notify.success("Order dispatched.");
+        state = { order: "", quantity: "", finalQty: null };
+        await load();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "🚚 Dispatch an Order"),
+      err, form, finalLine,
+      el("div", { class: "form-inline", style: "margin-top:0.8rem;" }, [el("button", { type: "button", onclick: submit }, "Dispatch")]),
+    ]));
+    if (state.order) onOrder(state.order);
+  }
+
+  async function printChallan(d) {
+    try {
+      const order = await apiGet(`/orders/${d.order}/`);
+      openPrintWindow("Delivery Challan", `<h1>Delivery Challan</h1><h2>Order ${order.order_number} — ${order.party_name}</h2>
+        <table><thead><tr><th>Order</th><th>Quantity Dispatched</th><th>Dispatch Date</th><th>Status</th></tr></thead>
+        <tbody><tr><td>${order.order_number}</td><td>${d.quantity_dispatched ?? "—"}</td><td>${d.dispatch_date || "—"}</td><td>${d.status}</td></tr></tbody></table>
+        <div class="sign"><div>Dispatched By</div><div>Received By</div></div>`);
+    } catch (e) { alert("Could not build challan: " + e.message); }
+  }
+
+  async function load() {
+    const [orders, dispatches] = await Promise.all([
+      fetchAll("/orders/?status=IN_FINISHING"),
+      fetchAll("/finishing/dispatch/"),
+    ]);
+    ORDERS = orders;
+    await renderForm();
+    const wrap = document.getElementById("dispatch-list");
+    wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Dispatched Orders"), body]));
+    dataTable(body, {
+      columns: [
+        { key: "order_number", label: "Order #" },
+        { key: "quantity_dispatched", label: "Qty Dispatched", value: d => Number(d.quantity_dispatched || 0) },
+        { key: "dispatch_date", label: "Date", render: d => d.dispatch_date || "—" },
+        { render: d => badge(d.status), label: "Status", value: d => d.status },
+        { render: d => el("button", { class: "secondary", type: "button", onclick: () => printChallan(d) }, "Challan"), label: "Print", sortable: false },
+      ], rows: dispatches, pageSize: 12, searchPlaceholder: "Search dispatches — order…", emptyText: "No dispatches yet.",
+    });
+  }
+
+  load();
+</script>
+{% endblock %}

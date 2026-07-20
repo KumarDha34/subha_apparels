@@ -1,0 +1,32 @@
+{% extends "frontend/base.html" %}
+{% block title %}Fabric Types - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Fabric Types</h2>
+  <p class="page-subtitle">Manage the fabric types used across product items.</p>
+
+  <div id="panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["MERCHANDISE"]);
+  renderShell("merch-fabric", "Fabric Types");
+
+  crudPanel(document.getElementById("panel"), {
+    title: "Fabric Types",
+    endpoint: "/master/fabric-types/",
+    columns: [
+      { key: "name", label: "Name" },
+      { key: "gsm", label: "GSM" },
+      { key: "composition", label: "Composition" },
+      { render: f => badge(f.is_active ? "Active" : "Inactive"), label: "Status" },
+    ],
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "gsm", label: "GSM", type: "number", step: "0.01" },
+      { name: "composition", label: "Composition (e.g. 100% Cotton)" },
+    ],
+    editable: true,
+  });
+</script>
+{% endblock %}

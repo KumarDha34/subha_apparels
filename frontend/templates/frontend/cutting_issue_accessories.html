@@ -1,0 +1,121 @@
+{% extends "frontend/base.html" %}
+{% block title %}Issue Accessories - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Issue Accessories to Production</h2>
+  <p class="page-subtitle">Cutting hands the accessories an order needs (thread, labels, zippers, drawcords…) straight to Production, so they travel with the cut bundles. Production then allocates them to operators during bundle assignment.</p>
+
+  <div id="accessory-card"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["CUTTING_SUPERVISOR"]);
+  renderShell("cutting-issue-accessories", "Issue Accessories");
+
+  const ELIGIBLE_ORDER_STATUSES = ["CONFIRMED", "IN_CUTTING", "IN_PRODUCTION", "IN_FINISHING"];
+
+  let MASTER = { orders: [], accessoryStocks: [] };
+  let state = blankIssue();
+  let errors = [];
+  let issues = [];
+
+  function blankIssue() {
+    return { order: "", accessory_stock: "", issued_quantity: "", issued_date: new Date().toISOString().slice(0, 10), remarks: "" };
+  }
+  function accessoryStockLabel(s) {
+    return `${s.accessory_label} — ${s.available_quantity} available` + (s.vendor_name ? ` · Vendor: ${s.vendor_name}` : "");
+  }
+  const orderLabel = o => `${o.order_number} — ${o.party_name}`;
+
+  async function loadMasterData() {
+    const [orders, accessoryStocks] = await Promise.all([
+      fetchAll("/orders/"),
+      fetchAll("/store/accessory-stock/?is_active=true"),
+    ]);
+    MASTER = {
+      orders: orders.filter(o => ELIGIBLE_ORDER_STATUSES.includes(o.status)),
+      accessoryStocks: accessoryStocks.filter(s => Number(s.available_quantity) > 0),
+    };
+  }
+
+  function renderCard() {
+    const root = document.getElementById("accessory-card");
+    root.innerHTML = "";
+
+    let body;
+    if (!MASTER.orders.length) {
+      body = el("p", { class: "muted" }, "No active orders yet — an order must be confirmed (and ideally in cutting) before its accessories are issued.");
+    } else if (!MASTER.accessoryStocks.length) {
+      body = el("p", { class: "muted" }, "No accessory stock available — ask Store to purchase & receive accessories first.");
+    } else {
+      const form = el("div", { class: "form-inline" }, [
+        field("Order", selectEl({ onchange: e => { state.order = e.target.value; } },
+          MASTER.orders.map(o => ({ value: o.id, label: orderLabel(o) })), state.order, "Select order")),
+        field("Accessory", selectEl({ onchange: e => { state.accessory_stock = e.target.value; } },
+          MASTER.accessoryStocks.map(s => ({ value: s.id, label: accessoryStockLabel(s) })), state.accessory_stock, "Select accessory")),
+        field("Quantity", numberInput(state.issued_quantity, v => state.issued_quantity = v, { min: "0", step: "0.01" })),
+        field("Issue Date", el("input", { type: "date", value: state.issued_date, oninput: e => state.issued_date = e.target.value })),
+      ]);
+      const remarks = field("Remarks", el("textarea", { oninput: e => state.remarks = e.target.value }, state.remarks || ""));
+      const saveBtn = el("button", { type: "button", onclick: issueAccessory }, "Issue Accessory to Production");
+      body = el("div", {}, [
+        errors.length ? el("div", { class: "error-msg" }, errors.join(" ")) : null,
+        form, remarks,
+        el("div", { class: "form-inline", style: "margin-top:0.75rem;" }, [saveBtn]),
+      ]);
+    }
+
+    root.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "🧷 Issue Accessory to Production"),
+      body,
+      el("div", { class: "section-title" }, "Recent Accessory Issues"),
+      renderTable(),
+    ]));
+  }
+
+  function renderTable() {
+    const box = el("div", {});
+    dataTable(box, {
+      columns: [
+        { label: "Issue #", key: "issue_number" }, { label: "Order", key: "order_number", render: i => i.order_number || badge("No Order") },
+        { label: "Accessory", key: "accessory_label" }, { label: "Quantity", key: "issued_quantity", value: i => Number(i.issued_quantity) },
+        { label: "Date", key: "issued_date", render: i => i.issued_date || "—" },
+      ], rows: issues, pageSize: 8, initialSort: { key: "issue_number", dir: "desc" },
+      searchPlaceholder: "Search accessory issues…", emptyText: "No accessories issued yet.",
+    });
+    return box;
+  }
+
+  async function issueAccessory() {
+    const errs = [];
+    if (!state.order) errs.push("Select an order.");
+    if (!state.accessory_stock) errs.push("Select an accessory.");
+    if (!state.issued_quantity || Number(state.issued_quantity) <= 0) errs.push("Enter a quantity greater than 0.");
+    errors = [...new Set(errs)];
+    if (errors.length) { renderCard(); return; }
+
+    try {
+      await apiPost("/production/accessory-issues/", {
+        order: Number(state.order), accessory_stock: Number(state.accessory_stock),
+        issued_quantity: Number(state.issued_quantity),
+        issued_date: state.issued_date || null, remarks: state.remarks || "",
+      });
+      state = blankIssue();
+      errors = [];
+      notify.success("Accessory issued to Production.");
+      await loadMasterData();
+      await refresh();
+    } catch (e) { errors = [e.message]; renderCard(); }
+  }
+
+  async function refresh() {
+    issues = await fetchAll("/production/accessory-issues/");
+    renderCard();
+  }
+
+  (async function init() {
+    await loadMasterData();
+    await refresh();
+  })();
+</script>
+{% endblock %}

@@ -1,0 +1,456 @@
+{% extends "frontend/base.html" %}
+{% block title %}Admin Overview - GMS{% endblock %}
+{% block content %}
+  <div class="page-header-row">
+    <div>
+      <h2 class="page-title">Admin Overview</h2>
+      <p class="page-subtitle">System-wide snapshot across every department.</p>
+    </div>
+    <a class="btn" href="/dashboard/kpi/">📈 Open Management KPI Dashboard</a>
+  </div>
+
+  <div class="grid grid-4" id="stat-cards"></div>
+
+  <div class="card" id="approvals-card">
+    <h3>✅ Work Needing Your Approval</h3>
+    <p class="card-subtitle">Everything across the floor waiting on an Admin decision — cutting over-consumption, operator shortages, and process-department shortfalls. Approve or reject right here.</p>
+    <div id="approvals-list" class="muted">Loading…</div>
+  </div>
+
+  <h3 class="section-title">Department Performance</h3>
+  <div class="grid" id="dept-performance" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));"></div>
+
+  <div class="card">
+    <h3>Orders Created vs. Dispatched — Last 8 Weeks</h3>
+    <div class="grid grid-2">
+      <div><div id="trend-created"></div></div>
+      <div><div id="trend-dispatched"></div></div>
+    </div>
+  </div>
+
+  <div class="grid grid-2">
+    <div class="card">
+      <h3>⚠️ Low Stock Alerts</h3>
+      <div id="low-stock-list" class="muted">Loading...</div>
+    </div>
+    <div class="card">
+      <h3>💳 Pending Payments</h3>
+      <div id="pending-list" class="muted">Loading...</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Recent Orders</h3>
+    <div id="recent-orders" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h3>📉 Piece Loss by Order &amp; Phase</h3>
+    <p class="card-subtitle">Where each order lost pieces — Cutting, Production (per operator) and Finishing (washing / printing / etc). Click an order for the full breakdown.</p>
+    <div id="loss-tracking" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h3>🗂️ Activity Log — who did what, and when</h3>
+    <p class="card-subtitle">Every action across all departments, most recent first. Search, sort any column, and page through.</p>
+    <div id="activity-log" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h3>Quick Links</h3>
+    <div class="form-inline">
+      <a class="btn" href="/users/">Manage Users & Roles</a>
+      <a class="btn" href="/masters/">Manage Master Data</a>
+      <a class="btn" href="/dashboard/accounts/">Open Accounts</a>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN"]);
+  renderShell("admin", "Admin Overview");
+
+  const cards = document.getElementById("stat-cards");
+  function statCard(label, value, kind) {
+    return el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
+      el("div", { class: "value" }, String(value)),
+      el("div", { class: "label" }, label),
+    ]);
+  }
+
+  /** Fetches a list endpoint and returns its total count, whether the
+   *  response is paginated ({count, results}) or a plain array (e.g.
+   *  low_stock). Returns "—" if the call fails, so one department's
+   *  outage doesn't block the others. */
+  async function countOf(path) {
+    try {
+      const data = await apiGet(path);
+      if (Array.isArray(data)) return data.length;
+      return data.count ?? (data.results ? data.results.length : 0);
+    } catch (e) { return "—"; }
+  }
+
+  function metricRow(label, value) {
+    return el("div", { class: "dept-metric-row" }, [
+      el("span", { class: "dm-label" }, label),
+      el("span", { class: "dm-value" }, String(value)),
+    ]);
+  }
+
+  function deptCard(icon, title, metrics, href, linkLabel, bottleneck) {
+    return el("div", { class: "card dept-card" }, [
+      el("h3", {}, [`${icon} ${title} `, bottleneck ? el("span", { class: "badge overdue" }, "⚠️ Bottleneck") : null]),
+      el("div", { class: "dept-metrics" }, metrics),
+      el("a", { class: "btn secondary", href }, linkLabel),
+    ]);
+  }
+
+  async function loadDepartmentPerformance() {
+    const dept = document.getElementById("dept-performance");
+
+    // Merchandising
+    const [ordersTotal, ordersDraft, ordersDispatched, ordersCancelled] = await Promise.all([
+      countOf("/orders/"), countOf("/orders/?status=DRAFT"),
+      countOf("/orders/?status=DISPATCHED"), countOf("/orders/?status=CANCELLED"),
+    ]);
+    const ordersActive = [ordersTotal, ordersDraft, ordersDispatched, ordersCancelled].includes("—")
+      ? "—" : ordersTotal - ordersDraft - ordersDispatched - ordersCancelled;
+
+    // Cutting
+    const [cutTotal, cutPending, cutCompleted, bundleTotal, cutBlocked, cutAwaiting] = await Promise.all([
+      countOf("/cutting/cutting-orders/"), countOf("/cutting/cutting-orders/?status=PENDING"),
+      countOf("/cutting/cutting-orders/?status=COMPLETED"), countOf("/cutting/bundles/"),
+      countOf("/cutting/cutting-orders/?average_status=DONT_CUT"),
+      countOf("/cutting/cutting-orders/?status=FABRIC_ISSUED"),
+    ]);
+    const cutPct = (cutTotal && cutTotal !== "—" && cutCompleted !== "—")
+      ? Math.round((cutCompleted / cutTotal) * 100) : null;
+
+    // Production -- also pulls every BundleAssignment once, reused for the
+    // system-wide Efficiency %/Quality Rate %/QC pass rate below (same
+    // formulas as OperatorViewSet.report, just aggregated across everyone
+    // instead of one operator -- no new backend endpoint needed).
+    const [operatorTotal, asgAssigned, asgInProgress, asgCompleted, asgQc, pendingShortage, allAssignments, awaitingBundles] = await Promise.all([
+      countOf("/operators/operators/"), countOf("/operators/assignments/?status=ASSIGNED"),
+      countOf("/operators/assignments/?status=IN_PROGRESS"),
+      countOf("/operators/assignments/?status=COMPLETED"),
+      countOf("/operators/assignments/?status=QUALITY_CHECKED"),
+      countOf("/operators/assignments/?shortage_reason_status=PENDING_REVIEW"),
+      fetchAll("/operators/assignments/").catch(() => []),
+      countOf("/cutting/bundles/?status=CREATED&sent_to_production_at__isnull=False"),
+    ]);
+    const asgActive = [asgAssigned, asgInProgress].includes("—") ? "—" : asgAssigned + asgInProgress;
+    const asgDone = [asgCompleted, asgQc].includes("—") ? "—" : asgCompleted + asgQc;
+
+    const issued = allAssignments.reduce((s, a) => s + (Number(a.issued_quantity) || 0), 0);
+    const returned = allAssignments.reduce((s, a) => s + (Number(a.returned_quantity) || 0), 0);
+    const defects = allAssignments.reduce((s, a) => s + (Number(a.defects) || 0), 0);
+    const qcChecked = allAssignments.filter(a => a.quality_check_passed !== null && a.quality_check_passed !== undefined).length;
+    const qcPassed = allAssignments.filter(a => a.quality_check_passed === true).length;
+    const efficiencyPct = issued ? Math.round(((returned - defects) / issued) * 10000) / 100 : null;
+    const qualityRatePct = returned ? Math.round(((returned - defects) / returned) * 10000) / 100 : null;
+    const qcPassRate = qcChecked ? Math.round((qcPassed / qcChecked) * 10000) / 100 : null;
+
+    // Finishing awaiting (orders handed to Finishing not yet dispatched).
+    const finishingAwaiting = await countOf("/orders/?status=IN_FINISHING");
+
+    // Bottleneck heuristic: whichever department's awaiting-count is
+    // largest (purely relative, computed client-side from numbers already
+    // fetched above) gets flagged -- a lightweight signal, not a queueing model.
+    const awaiting = { cutting: Number(cutPending) || 0, production: Number(awaitingBundles) || 0, finishing: Number(finishingAwaiting) || 0 };
+    const maxAwaiting = Math.max(awaiting.cutting, awaiting.production, awaiting.finishing);
+    const bottleneckDept = maxAwaiting > 0 ? Object.keys(awaiting).find(k => awaiting[k] === maxAwaiting) : null;
+
+    dept.appendChild(deptCard("📝", "Merchandising", [
+      metricRow("Total Orders", ordersTotal),
+      metricRow("Active", ordersActive),
+      metricRow("Dispatched", ordersDispatched),
+      metricRow("Cancelled", ordersCancelled),
+    ], "/dashboard/merchandising/", "View Merchandising →"));
+
+    // Store
+    const [stockTotal, lowStock, txnTotal] = await Promise.all([
+      countOf("/store/fabric-stock/"), countOf("/store/fabric-stock/low_stock/"),
+      countOf("/store/transactions/"),
+    ]);
+    dept.appendChild(deptCard("🧵", "Store", [
+      metricRow("Fabric Stock Items", stockTotal),
+      metricRow("Low Stock Alerts", lowStock),
+      metricRow("Stock Transactions", txnTotal),
+    ], "/dashboard/store/", "View Store →"));
+
+    dept.appendChild(deptCard("✂️", "Cutting", [
+      metricRow("Cutting Orders", cutTotal),
+      metricRow("Pending", cutPending),
+      metricRow("Completed", cutCompleted),
+      metricRow("%CUT (Completed/Total)", cutPct != null ? `${cutPct}%` : "—"),
+      metricRow("Bundles Cut", bundleTotal),
+      metricRow("Pending Cut Overrides", cutBlocked),
+    ], "/cutting/record-cut/", "Review Overrides →", bottleneckDept === "cutting"));
+
+    dept.appendChild(deptCard("🏭", "Production", [
+      metricRow("Operators", operatorTotal),
+      metricRow("Active Assignments", asgActive),
+      metricRow("Completed", asgDone),
+      metricRow("Efficiency %", efficiencyPct != null ? `${efficiencyPct}%` : "—"),
+      metricRow("Quality Rate %", qualityRatePct != null ? `${qualityRatePct}%` : "—"),
+      metricRow("QC Pass Rate", qcPassRate != null ? `${qcPassRate}%` : "—"),
+      metricRow("Pending Shortage Reviews", pendingShortage),
+    ], "/production/bundle-allocation/", "Review Shortages →", bottleneckDept === "production"));
+
+    dept.appendChild(deptCard("🧵", "Finishing", [
+      metricRow("Awaiting Dispatch (In Finishing)", finishingAwaiting),
+    ], "/dashboard/finishing/", "View Finishing →", bottleneckDept === "finishing"));
+
+    // Accounts
+    try {
+      const summary = await apiGet("/accounts/summary/");
+      dept.appendChild(deptCard("💰", "Accounts", [
+        metricRow("Total Income", fmtMoney(summary.total_income)),
+        metricRow("Total Expenses", fmtMoney(summary.total_expenses)),
+        metricRow("Net Profit", fmtMoney(summary.net_profit)),
+        metricRow("Pending Payments", fmtMoney(summary.pending_payments.total)),
+      ], "/dashboard/accounts/", "View Accounts →"));
+    } catch (e) {
+      dept.appendChild(deptCard("💰", "Accounts", [metricRow("Status", "Unavailable")], "/dashboard/accounts/", "View Accounts →"));
+    }
+  }
+
+  /** Buckets a list of {date} items into the last 8 ISO week-starts
+   *  (Monday), for the lightweight custom trend-bar component. */
+  function bucketByWeek(items, dateField) {
+    const weeks = [];
+    const today = new Date();
+    for (let i = 7; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - d.getDay() + 1 - i * 7); // Monday of that week
+      weeks.push(d.toISOString().slice(0, 10));
+    }
+    const counts = Object.fromEntries(weeks.map(w => [w, 0]));
+    items.forEach(item => {
+      const raw = item[dateField];
+      if (!raw) return;
+      const d = new Date(raw);
+      d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); // Monday of that item's week
+      const key = d.toISOString().slice(0, 10);
+      if (key in counts) counts[key] += 1;
+    });
+    return weeks.map(w => ({ week_label: w.slice(5), count: counts[w] }));
+  }
+
+  async function loadTrends() {
+    try {
+      const orders = await fetchAll("/orders/");
+      document.getElementById("trend-created").appendChild(
+        el("div", {}, [el("h4", {}, "Orders Created"), renderTrendBars(bucketByWeek(orders, "order_date"), "week_label", "count")]));
+    } catch (e) {}
+    try {
+      const dispatches = (await fetchAll("/finishing/dispatch/")).filter(d => d.dispatch_date && d.status !== "PENDING");
+      document.getElementById("trend-dispatched").appendChild(
+        el("div", {}, [el("h4", {}, "Orders Dispatched"), renderTrendBars(bucketByWeek(dispatches, "dispatch_date"), "week_label", "count")]));
+    } catch (e) {}
+  }
+  loadTrends();
+
+  async function loadOverview() {
+    try {
+      const orders = await apiGet("/orders/");
+      const orderItems = orders.results || orders;
+      cards.appendChild(statCard("Total Orders", orders.count ?? orderItems.length));
+
+      const recent = document.getElementById("recent-orders");
+      recent.innerHTML = "";
+      const table = el("table");
+      table.appendChild(el("thead", {}, el("tr", {}, ["Order #", "Party", "Type", "Status", "Date"].map(h => el("th", {}, h)))));
+      const tbody = el("tbody");
+      orderItems.slice(0, 8).forEach(o => {
+        tbody.appendChild(el("tr", {}, [
+          el("td", {}, o.order_number), el("td", {}, o.party_name || ""),
+          el("td", {}, o.order_type), el("td", {}, badge(o.status)), el("td", {}, o.order_date),
+        ]));
+      });
+      table.appendChild(tbody);
+      recent.appendChild(table);
+    } catch (e) { cards.appendChild(statCard("Total Orders", "—")); }
+
+    try {
+      const users = await apiGet("/users/");
+      cards.appendChild(statCard("Active Users", (users.results || users).length));
+    } catch (e) {}
+
+    try {
+      const lowStock = await apiGet("/store/fabric-stock/low_stock/");
+      cards.appendChild(statCard("Low Stock Items", lowStock.length, lowStock.length ? "warning" : "success"));
+      const list = document.getElementById("low-stock-list");
+      list.innerHTML = "";
+      if (lowStock.length === 0) { list.textContent = "No fabric stock is out of stock."; }
+      lowStock.forEach(s => list.appendChild(el("div", {}, `${s.fabric_type_name} / ${s.color_name} — ${s.available_quantity} ${s.unit} (out of stock)`)));
+    } catch (e) { document.getElementById("low-stock-list").textContent = "Unavailable."; }
+
+    try {
+      const assignments = await apiGet("/operators/assignments/?status=ASSIGNED");
+      cards.appendChild(statCard("Active Assignments", (assignments.results || assignments).length ?? assignments.length));
+    } catch (e) {}
+
+    try {
+      const summary = await apiGet("/accounts/summary/");
+      cards.appendChild(statCard("Total Income", fmtMoney(summary.total_income), "success"));
+      cards.appendChild(statCard("Total Expenses", fmtMoney(summary.total_expenses), "danger"));
+      cards.appendChild(statCard("Net Profit", fmtMoney(summary.net_profit)));
+
+      const pending = document.getElementById("pending-list");
+      pending.innerHTML = "";
+      pending.appendChild(el("div", {}, `To Suppliers: ${fmtMoney(summary.pending_payments.to_suppliers.amount)} (${summary.pending_payments.to_suppliers.count} invoices)`));
+      pending.appendChild(el("div", {}, `To Operators: ${fmtMoney(summary.pending_payments.to_operators.amount)} (${summary.pending_payments.to_operators.count} operators)`));
+      pending.appendChild(el("div", { style: "margin-top:0.5rem;font-weight:700;" }, `Total Pending: ${fmtMoney(summary.pending_payments.total)}`));
+    } catch (e) { document.getElementById("pending-list").textContent = "Unavailable."; }
+  }
+  loadOverview();
+  loadDepartmentPerformance();
+
+  /* ---- Piece loss by order & phase ---- */
+  const lossCell = n => (n > 0 ? el("span", { style: "color:var(--danger);font-weight:600;" }, String(n)) : "0");
+
+  async function loadLossTracking() {
+    const wrap = document.getElementById("loss-tracking");
+    try {
+      const rows = await apiGet("/orders/loss-summary/");
+      if (!rows.length) { wrap.textContent = "No orders to analyze yet."; return; }
+      wrap.innerHTML = "";
+      dataTable(wrap, {
+        columns: [
+          { label: "Order", key: "order_number", render: r => el("button", { class: "link-btn", type: "button", onclick: () => viewLoss(r.order, r.order_number) }, r.order_number) },
+          { label: "Party", key: "party_name" },
+          { label: "Status", key: "status", render: r => badge(r.status) },
+          { label: "Ordered", value: r => (r.ordered_pieces == null ? -1 : r.ordered_pieces), render: r => (r.ordered_pieces == null ? "—" : String(r.ordered_pieces)) },
+          { label: "Cutting Lost", value: r => (r.cutting_lost || 0), render: r => (r.cutting_lost == null ? "—" : lossCell(r.cutting_lost)) },
+          { label: "Production Lost", key: "production_lost", render: r => lossCell(r.production_lost) },
+          { label: "Finishing Lost", key: "finishing_lost", render: r => lossCell(r.finishing_lost) },
+          { label: "Total Lost", key: "total_lost", render: r => el("strong", { style: r.total_lost > 0 ? "color:var(--danger);" : "" }, String(r.total_lost)) },
+          { label: "Good", key: "good_pieces" },
+        ],
+        rows, pageSize: 8, initialSort: { key: "total_lost", dir: "desc" },
+        searchPlaceholder: "Search — order, party, status…",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="muted">Loss tracking unavailable: ${e.message}</p>`; }
+  }
+
+  async function viewLoss(orderId, orderNumber) {
+    const body = el("div", { class: "muted" }, "Loading breakdown…");
+    showCrudModal(`📉 Piece Loss — ${orderNumber}`, [body],
+      [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+    try {
+      const d = await apiGet(`/orders/${orderId}/loss-breakdown/`);
+      body.innerHTML = "";
+      body.appendChild(detailGrid([
+        ["Ordered Pieces", d.ordered_pieces == null ? "—" : String(d.ordered_pieces)],
+        ["Fabric Wastage", `${d.fabric_wastage_m} m`],
+        ["Cutting Lost", d.cutting.lost == null ? "—" : String(d.cutting.lost)],
+        ["Production Lost", String(d.production.lost)],
+        ["Production Defects", String(d.production.defects)],
+        ["Finishing Lost", String(d.finishing.lost)],
+        ["Total Lost", String(d.total_lost)],
+        ["Good Pieces", String(d.good_pieces)],
+      ]));
+
+      body.appendChild(el("div", { class: "section-title" }, "✂️ Cutting"));
+      body.appendChild(el("p", { class: "muted" },
+        `Ordered ${d.cutting.ordered ?? "—"} · Bundled ${d.cutting.bundled} · Lost ${d.cutting.lost ?? "—"} · Fabric wastage ${d.fabric_wastage_m} m`));
+
+      body.appendChild(el("div", { class: "section-title" }, "🏭 Production — by operator"));
+      if (!d.production.by_operator.length) {
+        body.appendChild(el("p", { class: "muted" }, "No production activity yet."));
+      } else {
+        const t = el("div", {});
+        dataTable(t, {
+          columns: [
+            { label: "Operator", key: "operator" }, { label: "Issued", key: "issued" }, { label: "Returned", key: "returned" },
+            { label: "Lost", key: "lost", render: r => lossCell(r.lost) },
+            { label: "Defects", key: "defects", render: r => (r.defects ? el("span", { style: "color:#b98600;font-weight:600;" }, String(r.defects)) : "0") },
+          ], rows: d.production.by_operator, pageSize: 8, searchable: false,
+        });
+        body.appendChild(t);
+      }
+
+      body.appendChild(el("div", { class: "section-title" }, "🧵 Finishing — by operation"));
+      if (!d.finishing.by_operation.length) {
+        body.appendChild(el("p", { class: "muted" }, "No finishing operations yet."));
+      } else {
+        const t = el("div", {});
+        dataTable(t, {
+          columns: [
+            { label: "Operation", key: "operation" }, { label: "Quantity", key: "quantity" },
+            { label: "Rejected / Lost", key: "rejected", render: r => lossCell(r.rejected) },
+          ], rows: d.finishing.by_operation, pageSize: 8, searchable: false,
+        });
+        body.appendChild(t);
+      }
+      body.appendChild(el("p", { class: "muted", style: "margin-top:0.6rem;" }, `Final QC rejected: ${d.finishing.final_qc_rejected}`));
+    } catch (e) { body.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+  loadLossTracking();
+
+  /* ---- Work needing Admin approval (with details + one-click actions) ---- */
+  async function approveAction(path, body, okMsg) {
+    try { await apiPost(path, body); notify.success(okMsg); await loadApprovals(); }
+    catch (e) { notify.error(e.message); }
+  }
+  function approvalRow(icon, title, detail, actions) {
+    return el("div", { class: "card", style: "padding:0.7rem 0.9rem;margin-bottom:0.5rem;display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;" }, [
+      el("div", {}, [el("div", { style: "font-weight:600;" }, `${icon} ${title}`), el("div", { class: "muted", style: "font-size:0.85rem;" }, detail)]),
+      el("div", { class: "form-inline" }, actions),
+    ]);
+  }
+  async function loadApprovals() {
+    const wrap = document.getElementById("approvals-list");
+    wrap.innerHTML = "Loading…";
+    try {
+      const [cuts, assigns, procs] = await Promise.all([
+        fetchAll("/cutting/cutting-orders/?average_status=DONT_CUT").catch(() => []),
+        fetchAll("/operators/assignments/?shortage_reason_status=PENDING_REVIEW").catch(() => []),
+        fetchAll("/production/process-dispatches/?status=PENDING_APPROVAL").catch(() => []),
+      ]);
+      const overrides = cuts.filter(c => !c.average_override_approved);
+      const shortages = assigns.filter(a => a.shortage_reason_status === "PENDING_REVIEW");
+      wrap.innerHTML = "";
+      const items = [];
+      overrides.forEach(c => items.push(approvalRow("✂️", `Cutting over-consumption — ${c.cutting_number}`,
+        `${c.order_number || ""} · ${c.color_name || ""} · actual ${c.actual_average} vs approved ${c.approved_average} m/pc`,
+        [el("button", { type: "button", onclick: () => approveAction(`/cutting/cutting-orders/${c.id}/approve_override/`, { approved: true, remarks: "Approved from overview." }, "Over-consumption approved.") }, "Approve")])));
+      shortages.forEach(a => items.push(approvalRow("🧑‍🏭", `Operator shortage — ${a.bundle_number}`,
+        `${a.operator_name} returned ${a.returned_quantity}/${a.issued_quantity} · reason: ${a.shortage_reason || "—"}`,
+        [el("button", { type: "button", onclick: () => approveAction(`/operators/assignments/${a.id}/review_shortage/`, { approved: true }, "Shortage approved.") }, "Approve"),
+         el("button", { class: "secondary", type: "button", onclick: () => approveAction(`/operators/assignments/${a.id}/review_shortage/`, { approved: false }, "Shortage rejected.") }, "Reject")])));
+      procs.forEach(p => items.push(approvalRow("🧺", `${p.department_display} shortfall — ${p.dispatch_number}`,
+        `${p.order_number} · received ${p.quantity_received}/${p.quantity_sent} · reason: ${p.loss_reason || "—"}`,
+        [el("button", { type: "button", onclick: () => approveAction(`/production/process-dispatches/${p.id}/approve_loss/`, { approved: true }, "Shortfall approved.") }, "Approve"),
+         el("button", { class: "secondary", type: "button", onclick: () => approveAction(`/production/process-dispatches/${p.id}/approve_loss/`, { approved: false }, "Shortfall rejected.") }, "Reject")])));
+      if (!items.length) { wrap.appendChild(el("p", { class: "muted" }, "🎉 Nothing pending — everything's approved and up to date.")); return; }
+      items.forEach(i => wrap.appendChild(i));
+    } catch (e) { wrap.innerHTML = `<p class="muted">Approvals unavailable: ${e.message}</p>`; }
+  }
+  loadApprovals();
+
+  async function loadActivity() {
+    const wrap = document.getElementById("activity-log");
+    try {
+      const logs = await fetchAll("/users/activity-logs/");
+      if (!logs.length) { wrap.textContent = "No activity recorded yet."; return; }
+      wrap.innerHTML = "";
+      dataTable(wrap, {
+        columns: [
+          { label: "When", key: "created_at", render: r => (r.created_at ? r.created_at.slice(0, 16).replace("T", " ") : "—") },
+          { label: "Who", key: "user_name" },
+          { label: "Role", key: "role", render: r => (ROLE_LABELS[r.role] || r.role || "—") },
+          { label: "Department", key: "department", render: r => r.department || "—" },
+          { label: "Activity", key: "action" },
+        ],
+        rows: logs, pageSize: 8, initialSort: { key: "created_at", dir: "desc" },
+        searchPlaceholder: "Search activity — name, action, department…",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="muted">Activity log unavailable: ${e.message}</p>`; }
+  }
+  loadActivity();
+</script>
+{% endblock %}

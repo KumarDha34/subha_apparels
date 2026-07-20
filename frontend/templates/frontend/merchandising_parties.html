@@ -1,0 +1,95 @@
+{% extends "frontend/base.html" %}
+{% block title %}Parties - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Parties / Customers</h2>
+  <p class="page-subtitle">Manage the customers orders are created for.</p>
+
+  <div id="panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["MERCHANDISE"]);
+  renderShell("merch-parties", "Parties");
+
+  async function viewParty(party, close) {
+    const ordersBox = el("div", { class: "muted" }, "Loading orders...");
+    const summaryBox = el("div", { class: "muted" }, "Loading summary...");
+    showCrudModal(`👤 ${party.name}`, [
+      detailGrid([
+        ["Contact Person", party.contact_person || "—"],
+        ["Phone", party.phone || "—"],
+        ["Email", party.email || "—"],
+        ["Status", badge(party.is_active ? "Active" : "Inactive")],
+      ]),
+      detailRow("Address", party.address || "—"),
+      el("div", { class: "section-title" }, "Summary"),
+      summaryBox,
+      el("div", { class: "section-title" }, "Order History"),
+      ordersBox,
+    ], [el("button", { class: "secondary", type: "button", onclick: close }, "Close")], { wide: true });
+
+    try {
+      const s = await apiGet(`/master/parties/${party.id}/summary/`);
+      summaryBox.innerHTML = "";
+      summaryBox.appendChild(detailGrid([
+        ["Total Orders", String(s.order_counts.total)],
+        ["Completed", String(s.order_counts.completed)],
+        ["Pending", String(s.order_counts.pending)],
+        ["Cancelled", String(s.order_counts.cancelled)],
+        ["Bundles Worked", String(s.bundles_total)],
+        ["Pieces Issued", String(s.pieces_issued)],
+        ["Pieces Returned", String(s.pieces_returned)],
+        ["Pieces Lost", String(s.pieces_lost)],
+        ["Total Defects", String(s.total_defects)],
+      ]));
+      if (s.operators.length) {
+        const table = el("table");
+        table.appendChild(el("thead", {}, el("tr", {}, ["Operator", "Bundles", "Pieces Issued", "Pieces Returned"].map(h => el("th", {}, h)))));
+        const tbody = el("tbody");
+        s.operators.forEach(o => tbody.appendChild(el("tr", {}, [
+          el("td", {}, o.operator__name || "—"), el("td", {}, String(o.bundles)),
+          el("td", {}, String(o.pieces_issued || 0)), el("td", {}, String(o.pieces_returned || 0)),
+        ])));
+        table.appendChild(tbody);
+        summaryBox.appendChild(el("div", { style: "margin-top:0.75rem;overflow-x:auto;" }, table));
+      }
+    } catch (e) {
+      summaryBox.textContent = "Could not load summary: " + e.message;
+    }
+
+    try {
+      const orders = await apiGet(`/master/parties/${party.id}/orders/`);
+      ordersBox.innerHTML = "";
+      if (!orders.length) {
+        ordersBox.appendChild(el("p", { class: "muted" }, "No orders yet from this party."));
+      } else {
+        orders.forEach(o => ordersBox.appendChild(renderOrderSummary(o)));
+      }
+    } catch (e) {
+      ordersBox.textContent = "Could not load orders: " + e.message;
+    }
+  }
+
+  crudPanel(document.getElementById("panel"), {
+    title: "Parties / Customers",
+    endpoint: "/master/parties/",
+    columns: [
+      { key: "name", label: "Name" },
+      { key: "contact_person", label: "Contact" },
+      { key: "phone", label: "Phone" },
+      { key: "email", label: "Email" },
+      { render: p => badge(p.is_active ? "Active" : "Inactive"), label: "Status" },
+    ],
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "contact_person", label: "Contact Person" },
+      { name: "phone", label: "Phone" },
+      { name: "email", label: "Email" },
+      { name: "address", label: "Address", type: "textarea" },
+    ],
+    editable: true,
+    onView: viewParty,
+  });
+</script>
+{% endblock %}

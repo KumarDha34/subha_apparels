@@ -1,0 +1,64 @@
+{% extends "frontend/base.html" %}
+{% block title %}Order P&amp;L - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Per-Order Profit &amp; Loss</h2>
+  <p class="page-subtitle">Fabric, accessory, labor, finishing, and transport cost vs. income received, for each order.</p>
+
+  <div id="orders-table-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ACCOUNTS"]);
+  renderShell("accounts-order-pnl", "Order P&L");
+
+  async function viewPnl(order) {
+    const closeBtn = el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close");
+    const body = el("div", { class: "muted" }, "Loading...");
+    showCrudModal(`📊 P&L — ${order.order_number}`, [body], [closeBtn], { wide: true });
+    try {
+      const p = await apiGet(`/accounts/orders/${order.id}/pnl/`);
+      body.innerHTML = "";
+      body.appendChild(detailGrid([
+        ["Fabric Cost", fmtMoney(p.costs.fabric_cost)],
+        ["Accessory Cost", fmtMoney(p.costs.accessory_cost)],
+        ["Labor Cost", fmtMoney(p.costs.labor_cost)],
+        ["Finishing Cost", fmtMoney(p.costs.finishing_cost)],
+        ["Transport Cost", fmtMoney(p.costs.transport_cost)],
+        ["Total Cost", fmtMoney(p.costs.total_cost)],
+        ["Income Received", fmtMoney(p.income_received)],
+        ["Profit / Loss", fmtMoney(p.profit_loss)],
+      ]));
+      const profitClass = p.profit_loss >= 0 ? "stat-success" : "stat-danger";
+      body.appendChild(el("div", { class: `card stat ${profitClass}`, style: "margin-top:1rem;" }, [
+        el("div", { class: "value" }, fmtMoney(p.profit_loss)),
+        el("div", { class: "label" }, p.profit_loss >= 0 ? "Net Profit" : "Net Loss"),
+      ]));
+      body.appendChild(el("p", { class: "muted", style: "margin-top:1rem;" }, p.note));
+    } catch (e) {
+      body.innerHTML = `<p class="error-msg">Could not load P&amp;L: ${e.message}</p>`;
+    }
+  }
+
+  async function refresh() {
+    const wrap = document.getElementById("orders-table-wrap");
+    wrap.innerHTML = "Loading...";
+    try {
+      const orders = await fetchAll("/orders/");
+      wrap.innerHTML = "";
+      const body = el("div", {});
+      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Orders"), body]));
+      dataTable(body, {
+        columns: [
+          { label: "Order #", key: "order_number" }, { label: "Party", key: "party_name" },
+          { label: "Status", key: "status", render: o => badge(o.status) }, { label: "Date", key: "order_date" },
+          { label: "", sortable: false, render: o => el("button", { class: "secondary", type: "button", onclick: () => viewPnl(o) }, "View P&L") },
+        ], rows: orders, pageSize: 12, initialSort: { key: "order_date", dir: "desc" },
+        searchPlaceholder: "Search orders — number, party, status…", emptyText: "No orders yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  refresh();
+</script>
+{% endblock %}

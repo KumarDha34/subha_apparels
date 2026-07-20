@@ -1,0 +1,44 @@
+{% extends "frontend/base.html" %}
+{% block title %}Finished Goods - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Finished Goods</h2>
+  <p class="page-subtitle">Completed garments logged into Store when Finishing dispatches an order — the last step of the fabric-to-shipment loop.</p>
+  <div id="stats" class="grid grid-4" style="margin-bottom:1rem;"></div>
+  <div class="card"><div id="tbl"><p class="muted">Loading…</p></div></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-finished-goods", "Finished Goods");
+
+  async function load() {
+    let rows;
+    try { rows = await fetchAll("/store/finished-goods/"); }
+    catch (e) { document.getElementById("tbl").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+
+    const orders = new Set(rows.map(r => r.order)).size;
+    const pieces = rows.reduce((s, r) => s + (r.quantity || 0), 0);
+    const stats = document.getElementById("stats");
+    stats.innerHTML = "";
+    [["Finished Orders", orders], ["Total Pieces", pieces], ["Records", rows.length]].forEach(([label, value]) =>
+      stats.appendChild(el("div", { class: "card stat" }, [
+        el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label)])));
+
+    const tbl = document.getElementById("tbl");
+    tbl.innerHTML = "";
+    dataTable(tbl, {
+      columns: [
+        { key: "order_number", label: "Order" },
+        { key: "party_name", label: "Party", render: r => r.party_name || "—" },
+        { key: "quantity", label: "Pieces", value: r => r.quantity },
+        { key: "dispatch_reference", label: "Dispatch Ref", render: r => r.dispatch_reference || "—" },
+        { key: "received_at", label: "Logged", render: r => (r.received_at ? new Date(r.received_at).toLocaleDateString() : "—") },
+        { key: "remarks", label: "Remarks", render: r => r.remarks || "—", sortable: false },
+      ],
+      rows, pageSize: 15, searchPlaceholder: "Search finished goods…", emptyText: "No finished goods logged yet.",
+    });
+  }
+  load();
+</script>
+{% endblock %}

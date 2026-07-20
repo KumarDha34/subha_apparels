@@ -1,0 +1,52 @@
+{% extends "frontend/base.html" %}
+{% block title %}Cutting Setup - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Cutting Setup</h2>
+  <p class="page-subtitle">Reference data used while cutting: Markers (fabric efficiency for ratio orders) and Product Components (for bundle validation).</p>
+
+  <div id="panels"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["CUTTING_SUPERVISOR"]);
+  renderShell("cutting-setup", "Cutting Setup");
+
+  const panels = document.getElementById("panels");
+
+  crudPanel(panels, {
+    title: "Markers (reusable fabric consumption per ratio set)",
+    endpoint: "/cutting/markers/",
+    columns: [
+      { key: "marker_number", label: "Marker #" },
+      { key: "name", label: "Name" },
+      { key: "fabric_type_name", label: "Fabric Type" },
+      { key: "avg_consumption_per_set", label: "Avg / Set (m)" },
+      { render: m => badge(m.is_active ? "Active" : "Inactive"), label: "Status" },
+    ],
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "fabric_type", label: "Fabric Type", type: "select", optionsEndpoint: "/master/fabric-types/", optionsLabel: "name" },
+      { name: "avg_consumption_per_set", label: "Avg Consumption per Set (meters)", type: "number", step: "0.001", required: true },
+      { name: "remarks", label: "Remarks", type: "textarea" },
+    ],
+    editable: true,
+  });
+
+  crudPanel(panels, {
+    title: "Product Components (Front Panel, Back Panel, Sleeve, Collar, ...)",
+    endpoint: "/master/product-components/",
+    columns: [
+      { key: "product_name", label: "Product" },
+      { key: "name", label: "Component" },
+      { render: c => c.is_primary ? badge("Primary") : "—", label: "Primary" },
+      { render: c => badge(c.is_active ? "Active" : "Inactive"), label: "Status" },
+    ],
+    fields: [
+      { name: "product", label: "Product", type: "select", optionsEndpoint: "/master/products/", optionsLabel: "name", required: true },
+      { name: "name", label: "Component Name", required: true },
+    ],
+    editable: true,
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,164 @@
+{% extends "frontend/base.html" %}
+{% block title %}Management KPI Dashboard - GMS{% endblock %}
+{% block content %}
+  <style>
+    .kpi-section-title { font-size: 1.05rem; font-weight: 700; margin: 1.8rem 0 0.9rem; display: flex; align-items: center; gap: 0.55rem; letter-spacing: -0.01em; }
+    .kpi-section-title .kpi-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--brand); }
+    .kpi { padding: 1.25rem 1.3rem; }
+    .kpi-label { font-size: 0.78rem; font-weight: 600; color: var(--text-muted); }
+    .kpi-value { font-size: 1.72rem; font-weight: 700; letter-spacing: -0.02em; margin: 0.35rem 0 0.15rem; line-height: 1.1; }
+    .kpi-value.neg { color: var(--danger); }
+    .kpi-value.pos { color: #00a844; }
+    .kpi-sub { font-size: 0.78rem; color: var(--text-muted); }
+    .kpi-chip { display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 0.12rem 0.5rem; border-radius: 999px; margin-left: 0.4rem; }
+    .kpi-chip.good { background: #dcfce7; color: #166534; }
+    .kpi-chip.warn { background: #fef3c7; color: #92400e; }
+    .kpi-chip.bad  { background: #fee2e2; color: #991b1b; }
+    .attention-item { display: flex; align-items: flex-start; gap: 0.7rem; padding: 0.7rem 0; border-bottom: 1px dashed var(--border); font-size: 0.9rem; }
+    .attention-item:last-child { border-bottom: none; }
+    .attention-item .att-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 0.4rem; flex-shrink: 0; }
+    .att-danger .att-dot { background: var(--danger); }
+    .att-warning .att-dot { background: var(--warning); }
+    .att-info .att-dot { background: var(--info); }
+    .att-success .att-dot { background: var(--success); }
+  </style>
+
+  <div class="page-header-row">
+    <div>
+      <h2 class="page-title">Management KPI Dashboard</h2>
+      <p class="page-subtitle" id="kpi-subtitle">The whole business in one screen — sales, production, quality, people and cash.</p>
+    </div>
+    <a class="btn secondary" href="/dashboard/admin/">← Admin Overview</a>
+  </div>
+  <div class="mode-banner mode-fixed" style="margin-top:0;">
+    Admin-only view. Every number rolls up from the detail pages elsewhere in this dashboard — drill into any section for the underlying transactions.
+  </div>
+
+  <div id="kpi-body"><p class="muted">Loading business metrics…</p></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN"]);
+  renderShell("kpi", "Management KPIs");
+
+  const num = n => Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+  const pct = n => (n === null || n === undefined) ? "—" : `${n}%`;
+
+  function kpiCard(label, value, sub, opts = {}) {
+    return el("div", { class: "card kpi" }, [
+      el("div", { class: "kpi-label" }, label),
+      el("div", { class: `kpi-value ${opts.tone || ""}` }, [
+        String(value),
+        opts.chip ? el("span", { class: `kpi-chip ${opts.chipKind || "good"}` }, opts.chip) : null,
+      ]),
+      el("div", { class: "kpi-sub" }, sub || ""),
+    ]);
+  }
+
+  function sectionTitle(text) {
+    return el("h3", { class: "kpi-section-title" }, [el("span", { class: "kpi-dot" }), text]);
+  }
+
+  function grid(cards) {
+    return el("div", { class: "grid grid-4" }, cards);
+  }
+
+  function effChip(v) {
+    if (v === null || v === undefined) return { chip: null };
+    if (v >= 90) return { chip: "Healthy", chipKind: "good" };
+    if (v >= 75) return { chip: "Watch", chipKind: "warn" };
+    return { chip: "Low", chipKind: "bad" };
+  }
+
+  async function load() {
+    const body = document.getElementById("kpi-body");
+    let d;
+    try { d = await apiGet("/accounts/kpi/"); }
+    catch (e) { body.innerHTML = `<p class="error-msg">Could not load KPIs: ${e.message}</p>`; return; }
+
+    if (d.as_of) {
+      const nice = new Date(d.as_of).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+      document.getElementById("kpi-subtitle").textContent =
+        `The whole business in one screen — sales, production, quality, people and cash · ${nice}`;
+    }
+
+    body.innerHTML = "";
+    const fin = d.financial, prod = d.production, qp = d.quality_people, pipe = d.pipeline;
+
+    // ---- Financial health ----
+    body.appendChild(sectionTitle("Financial health"));
+    body.appendChild(grid([
+      kpiCard("Revenue Received", fmtMoney(fin.revenue_received), `across ${fin.income_record_count} income entr${fin.income_record_count === 1 ? "y" : "ies"}`),
+      kpiCard("Total Expenses", fmtMoney(fin.total_expenses), "materials, labour, finishing, overheads"),
+      kpiCard("Net Profit", fmtMoney(fin.net_profit),
+        fin.margin_pct !== null ? `${fin.margin_pct}% margin` : "margin n/a",
+        { tone: fin.net_profit < 0 ? "neg" : "pos" }),
+      kpiCard("Net Cash Position", fmtMoney(fin.net_cash_position),
+        fin.net_cash_position < 0 ? "Net negative" : "Net positive",
+        { tone: fin.net_cash_position < 0 ? "neg" : "pos" }),
+    ]));
+
+    // ---- Production & efficiency ----
+    body.appendChild(sectionTitle("Production & efficiency"));
+    body.appendChild(grid([
+      kpiCard("Total Pieces Produced", num(prod.pieces_produced), "finished, all time"),
+      kpiCard("Overall Efficiency", pct(prod.efficiency_pct), "returned vs issued", effChip(prod.efficiency_pct)),
+      kpiCard("Avg Fabric Wastage", pct(prod.wastage_pct), "actual vs fabric used"),
+      kpiCard("Orders Pending Dispatch", num(prod.orders_pending_dispatch), `of ${prod.orders_total} active orders`),
+    ]));
+
+    // ---- Quality & people ----
+    body.appendChild(sectionTitle("Quality & people"));
+    body.appendChild(grid([
+      kpiCard("Total Rejects", num(qp.total_rejects), `${num(qp.stitching_rejects)} stitching · ${num(qp.finishing_rejects)} finishing`),
+      kpiCard("Top Reject Reason", qp.top_reject_reason || "—", `${num(qp.top_reject_pieces)} pieces`),
+      kpiCard("Employees on Record", num(qp.employees), "in Operator master"),
+      kpiCard("Active Operators", num(qp.active_operators), "logged output at least once"),
+    ]));
+
+    // ---- Order pipeline ----
+    body.appendChild(sectionTitle("Order pipeline"));
+    body.appendChild(grid([
+      kpiCard("Total Orders", num(pipe.total_orders), "all time"),
+      kpiCard("Fulfilment Rate", `${pipe.fulfilment_rate}%`, `${num(pipe.dispatched)} dispatched`),
+      kpiCard("In Progress", num(pipe.in_progress), "active, not yet dispatched"),
+      kpiCard("Cancelled Orders", num(pipe.cancelled), pipe.cancelled ? "review reasons" : "none"),
+    ]));
+
+    // ---- Labour by style ----
+    body.appendChild(sectionTitle("Production & labour by style"));
+    const styleCard = el("div", { class: "card" });
+    if (!d.by_style.length) {
+      styleCard.appendChild(el("p", { class: "muted" }, "No completed production yet — figures appear once operators return pieces."));
+    } else {
+      const table = el("table");
+      table.appendChild(el("thead", {}, el("tr", {}, ["Style", "Pieces Produced", "Operator Labour", "Avg Rate / pc"].map(h => el("th", {}, h)))));
+      const tb = el("tbody");
+      d.by_style.forEach(r => {
+        tb.appendChild(el("tr", {}, [
+          el("td", {}, r.style),
+          el("td", {}, num(r.pieces)),
+          el("td", {}, fmtMoney(r.labor_cost)),
+          el("td", {}, fmtMoney(r.avg_rate)),
+        ]));
+      });
+      table.appendChild(tb);
+      styleCard.appendChild(table);
+    }
+    body.appendChild(styleCard);
+
+    // ---- Needs attention ----
+    body.appendChild(sectionTitle("Top things needing attention"));
+    const attCard = el("div", { class: "card" });
+    d.attention.forEach(a => {
+      attCard.appendChild(el("div", { class: `attention-item att-${a.level}` }, [
+        el("span", { class: "att-dot" }),
+        el("span", {}, a.text),
+      ]));
+    });
+    body.appendChild(attCard);
+  }
+  load();
+</script>
+{% endblock %}

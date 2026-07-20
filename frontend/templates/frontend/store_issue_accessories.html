@@ -1,0 +1,128 @@
+{% extends "frontend/base.html" %}
+{% block title %}Issue Accessories - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Issue Accessories to Operator</h2>
+  <p class="page-subtitle">Store hands the required accessories (thread, zippers, buttons, labels…) directly to an operator. We then track how much each operator used, on how many pieces, and how much is left.</p>
+
+  <div id="issue-form"></div>
+  <div id="issues-table"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER", "PRODUCTION_SUPERVISOR"]);
+  renderShell("store-issue-accessories", "Issue Accessories");
+
+  const ELIGIBLE = ["CONFIRMED", "IN_CUTTING", "IN_PRODUCTION", "IN_FINISHING"];
+  let MASTER = { operators: [], accessories: [], orders: [] };
+  let state = blankIssue();
+  let ISSUES = [];
+
+  function blankIssue() {
+    return { operator: "", accessory_stock: "", order: "", issued_quantity: "", issued_date: new Date().toISOString().slice(0, 10), remarks: "" };
+  }
+  const accLabel = s => `${s.accessory_label} — ${s.available_quantity} available`;
+
+  async function loadMaster() {
+    const [operators, accessories, orders] = await Promise.all([
+      fetchAll("/operators/operators/?is_active=true"),
+      fetchAll("/store/accessory-stock/?is_active=true"),
+      fetchAll("/orders/"),
+    ]);
+    MASTER = {
+      operators, orders: orders.filter(o => ELIGIBLE.includes(o.status)),
+      accessories: accessories.filter(s => Number(s.available_quantity) > 0),
+    };
+  }
+
+  function renderForm() {
+    const wrap = document.getElementById("issue-form");
+    wrap.innerHTML = "";
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    let body;
+    if (!MASTER.operators.length) body = el("p", { class: "muted" }, "No active operators yet — add operators first.");
+    else if (!MASTER.accessories.length) body = el("p", { class: "muted" }, "No accessory stock available — receive accessories via Purchase Orders first.");
+    else {
+      const form = el("div", { class: "form-inline" }, [
+        field("Operator", selectEl({ onchange: e => state.operator = e.target.value }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), state.operator, "Select operator")),
+        field("Accessory", selectEl({ onchange: e => state.accessory_stock = e.target.value }, MASTER.accessories.map(s => ({ value: s.id, label: accLabel(s) })), state.accessory_stock, "Select accessory")),
+        field("Quantity", numberInput(state.issued_quantity, v => state.issued_quantity = v, { min: "0", step: "0.01" })),
+        field("For Order (optional)", selectEl({ onchange: e => state.order = e.target.value }, MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "— any —")),
+        field("Issue Date", el("input", { type: "date", value: state.issued_date, oninput: e => state.issued_date = e.target.value })),
+      ]);
+      const remarks = field("Remarks", el("textarea", { oninput: e => state.remarks = e.target.value }, state.remarks || ""));
+      body = el("div", {}, [err, form, remarks, el("div", { class: "form-inline", style: "margin-top:0.7rem;" }, [el("button", { type: "button", onclick: submitIssue }, "Issue to Operator")])]);
+    }
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "🧷 Issue Accessory to Operator"), body]));
+    wrap._err = err;
+  }
+
+  async function submitIssue() {
+    const err = document.getElementById("issue-form")._err; err.style.display = "none";
+    if (!state.operator || !state.accessory_stock || !state.issued_quantity || Number(state.issued_quantity) <= 0) {
+      err.textContent = "Select an operator, accessory, and a quantity greater than 0."; err.style.display = "block"; return;
+    }
+    try {
+      const body = { operator: Number(state.operator), accessory_stock: Number(state.accessory_stock), issued_quantity: Number(state.issued_quantity), issued_date: state.issued_date || null, remarks: state.remarks || "" };
+      if (state.order) body.order = Number(state.order);
+      await apiPost("/production/operator-accessory-issues/", body);
+      notify.success("Accessory issued to operator.");
+      state = blankIssue();
+      await loadMaster(); renderForm(); await refreshIssues();
+    } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+  }
+
+  function openUsage(iss) {
+    const usedI = numberInput(iss.used_quantity ?? "", () => {}, { min: "0", step: "0.01" });
+    const piecesI = numberInput(iss.pieces_covered ?? "", () => {}, { min: "0", step: "1" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      try {
+        await apiPost(`/production/operator-accessory-issues/${iss.id}/record_usage/`, { used_quantity: Number(usedI.value || 0), pieces_covered: Number(piecesI.value || 0) });
+        closeCrudModal(); notify.success("Usage recorded."); await refreshIssues();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`Record Usage — ${iss.issue_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.5rem;" }, `Issued ${iss.issued_quantity} to ${iss.operator_name}. Enter cumulative used total and pieces covered.`),
+      err, field("Used Quantity (total so far)", usedI), field("Pieces Covered", piecesI),
+    ], [el("button", { type: "button", onclick: submit }, "Save"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
+  }
+
+  async function returnUnused(iss) {
+    const qty = prompt(`Quantity to return unused (max ${iss.remaining_quantity}):`);
+    if (qty === null || !qty) return;
+    try { await apiPost(`/production/operator-accessory-issues/${iss.id}/return_unused/`, { quantity: Number(qty) }); notify.success("Returned to stock."); await refreshIssues(); }
+    catch (e) { notify.error(e.message); }
+  }
+
+  async function refreshIssues() {
+    const wrap = document.getElementById("issues-table"); wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Accessories Issued to Operators — usage tracking"), body]));
+    try {
+      ISSUES = await fetchAll("/production/operator-accessory-issues/");
+      dataTable(body, {
+        columns: [
+          { label: "Issue #", key: "issue_number" },
+          { label: "Operator", key: "operator_name" },
+          { label: "Accessory", key: "accessory_label" },
+          { label: "Order", value: i => i.order_number || "", render: i => i.order_number || "—" },
+          { label: "Issued", key: "issued_quantity", value: i => Number(i.issued_quantity) },
+          { label: "Used", key: "used_quantity", value: i => Number(i.used_quantity) },
+          { label: "Pieces", key: "pieces_covered", value: i => Number(i.pieces_covered) },
+          { label: "Remaining", value: i => Number(i.remaining_quantity), render: i => el("strong", { style: Number(i.remaining_quantity) > 0 ? "color:#00a844;" : "" }, String(i.remaining_quantity)) },
+          { label: "Actions", sortable: false, render: i => el("div", { class: "form-inline" }, [
+              el("button", { class: "secondary", type: "button", onclick: () => openUsage(i) }, "Record Usage"),
+              Number(i.remaining_quantity) > 0 ? el("button", { class: "secondary", type: "button", onclick: () => returnUnused(i) }, "Return Unused") : null,
+            ]) },
+        ], rows: ISSUES, pageSize: 10, initialSort: { key: "issue_number", dir: "desc" },
+        searchPlaceholder: "Search — operator, accessory, order…", emptyText: "No accessories issued to operators yet.",
+      });
+    } catch (e) { body.appendChild(el("p", { class: "error-msg" }, "Could not load: " + e.message)); }
+  }
+
+  (async function init() {
+    await loadMaster(); renderForm(); await refreshIssues();
+  })();
+</script>
+{% endblock %}

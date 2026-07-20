@@ -1,0 +1,71 @@
+{% extends "frontend/base.html" %}
+{% block title %}Merchandising - GMS{% endblock %}
+{% block content %}
+  <div class="page-header-row">
+    <div>
+      <h2 class="page-title">Merchandising Dashboard</h2>
+      <p class="page-subtitle">Overview of your order pipeline.</p>
+    </div>
+    <a class="btn" href="/merchandising/orders/">+ New Order</a>
+  </div>
+
+  <div class="grid grid-4" id="stat-cards"></div>
+
+  <div class="card">
+    <h3>Recent Orders</h3>
+    <div id="recent-orders" class="muted">Loading...</div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["MERCHANDISE"]);
+  renderShell("merch-dashboard", "Merchandising");
+
+  function statCard(label, value, kind) {
+    return el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
+      el("div", { class: "value" }, String(value)),
+      el("div", { class: "label" }, label),
+    ]);
+  }
+
+  async function loadOverview() {
+    const cards = document.getElementById("stat-cards");
+    try {
+      const data = await apiGet("/orders/");
+      const orders = data.results || data;
+      const byStatus = {};
+      orders.forEach(o => { byStatus[o.status] = (byStatus[o.status] || 0) + 1; });
+
+      cards.appendChild(statCard("Total Orders", data.count ?? orders.length));
+      cards.appendChild(statCard("Draft", byStatus.DRAFT || 0, "warning"));
+      cards.appendChild(statCard("Confirmed", byStatus.CONFIRMED || 0));
+      cards.appendChild(statCard("Dispatched", byStatus.DISPATCHED || 0, "success"));
+
+      const recent = document.getElementById("recent-orders");
+      recent.innerHTML = "";
+      if (orders.length === 0) {
+        recent.appendChild(el("p", { class: "muted" }, "No orders yet — click “+ New Order” to create the first one."));
+      } else {
+        const table = el("table");
+        table.appendChild(el("thead", {}, el("tr", {}, ["Order #", "Party", "Type", "Status", "Date"].map(h => el("th", {}, h)))));
+        const tbody = el("tbody");
+        orders.slice(0, 8).forEach(o => {
+          tbody.appendChild(el("tr", {}, [
+            el("td", {}, o.order_number), el("td", {}, o.party_name || ""),
+            el("td", {}, o.order_type === "FIXED_QUANTITY" ? "Fixed" : "Ratio"),
+            el("td", {}, badge(o.status)), el("td", {}, o.order_date),
+          ]));
+        });
+        table.appendChild(tbody);
+        recent.appendChild(table);
+        recent.appendChild(el("div", { style: "margin-top:0.9rem;" }, el("a", { class: "btn secondary", href: "/merchandising/orders/" }, "View all orders →")));
+      }
+    } catch (e) {
+      cards.appendChild(statCard("Total Orders", "—"));
+      document.getElementById("recent-orders").textContent = "Unavailable.";
+    }
+  }
+  loadOverview();
+</script>
+{% endblock %}

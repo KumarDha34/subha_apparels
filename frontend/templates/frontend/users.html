@@ -1,0 +1,89 @@
+{% extends "frontend/base.html" %}
+{% block title %}Users & Roles - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Users & Roles</h2>
+  <p class="page-subtitle">Create a login for each employee and assign the role that drives their dashboard and permissions.</p>
+  <div id="reset-requests"></div>
+  <div id="panels"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN"]);
+  renderShell("users", "Users & Roles");
+  const panels = document.getElementById("panels");
+
+  crudPanel(panels, {
+    title: "Employees",
+    endpoint: "/users/",
+    columns: [
+      { key: "username", label: "Username" },
+      { key: "first_name", label: "First Name" },
+      { key: "last_name", label: "Last Name" },
+      { key: "role", label: "Role" },
+      { render: u => u.is_active ? badge("ACTIVE") : badge("INACTIVE"), label: "Status" },
+    ],
+    fields: [
+      { name: "username", label: "Username", required: true },
+      { name: "password", label: "Password", type: "password", required: true },
+      { name: "first_name", label: "First Name" },
+      { name: "last_name", label: "Last Name" },
+      { name: "email", label: "Email" },
+      { name: "phone", label: "Phone" },
+      {
+        name: "role", label: "Role", type: "select", required: true,
+        choices: ["ADMIN", "MERCHANDISE", "STORE_MANAGER", "CUTTING_SUPERVISOR", "PRODUCTION_SUPERVISOR", "FINISHING_SUPERVISOR", "ACCOUNTS", "OPERATOR"],
+      },
+    ],
+  });
+
+  /* ---- Password reset requests (from the login "Forgot password?" flow) ---- */
+  function openAdminReset(userId, label) {
+    const pw = el("input", { type: "password", autocomplete: "new-password" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      if (!pw.value || pw.value.length < 8) { err.textContent = "Enter a new password (at least 8 characters)."; err.style.display = "block"; return; }
+      try {
+        await apiPost(`/users/${userId}/admin_reset_password/`, { new_password: pw.value });
+        closeCrudModal();
+        toast(`Password reset for ${label}. Share the new password with them.`, "success");
+        loadResetRequests();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`Reset password — ${label}`, [
+      el("p", { class: "muted", style: "margin-top:-0.5rem;" }, "Set a new temporary password for this employee, then relay it to them."),
+      err, field("New Password", pw),
+    ], [
+      el("button", { type: "button", onclick: submit }, "Set Password"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+    pw.focus();
+  }
+
+  async function loadResetRequests() {
+    const wrap = document.getElementById("reset-requests");
+    wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "🔑 Password Reset Requests"),
+      el("p", { class: "card-subtitle" }, "Employees who used “Forgot password?” on the login page. Set a new password and share it with them."),
+      body,
+    ]));
+    try {
+      const reqs = await fetchAll("/users/reset-requests/?handled=false");
+      if (!reqs.length) { body.appendChild(el("p", { class: "muted" }, "No pending reset requests.")); return; }
+      dataTable(body, {
+        columns: [
+          { label: "Email", key: "email" },
+          { label: "Requested", key: "created_at", render: r => (r.created_at ? r.created_at.slice(0, 16).replace("T", " ") : "—") },
+          { label: "Action", sortable: false, render: r => r.user
+              ? el("button", { type: "button", onclick: () => openAdminReset(r.user, r.email) }, "Set New Password")
+              : el("span", { class: "muted" }, "No matching account") },
+        ],
+        rows: reqs, pageSize: 6, searchable: reqs.length > 6,
+      });
+    } catch (e) { body.appendChild(el("p", { class: "muted" }, "Could not load requests.")); }
+  }
+  loadResetRequests();
+</script>
+{% endblock %}

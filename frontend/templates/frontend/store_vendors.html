@@ -1,0 +1,85 @@
+{% extends "frontend/base.html" %}
+{% block title %}Vendors - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Vendors / Suppliers</h2>
+  <p class="page-subtitle">Suppliers used for bulk and order-specific purchases.</p>
+
+  <div id="panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-vendors", "Vendors");
+
+  async function viewVendorDetail(vendor, close) {
+    const summaryBox = el("div", { class: "muted" }, "Loading purchase summary...");
+    const historyBox = el("div", { class: "muted" }, "Loading purchase orders...");
+    showCrudModal(`🤝 ${vendor.company_name}`, [
+      detailGrid([
+        ["Contact Person", vendor.contact_person || "—"],
+        ["Phone", vendor.phone || "—"],
+        ["Email", vendor.email || "—"],
+        ["GST Number", vendor.gst_number || "—"],
+        ["Payment Terms", vendor.payment_terms ? vendor.payment_terms.replace("_", " ") : "—"],
+        ["Status", badge(vendor.is_active ? "Active" : "Inactive")],
+      ]),
+      el("div", { class: "section-title" }, "Purchase Summary"),
+      summaryBox,
+      el("div", { class: "section-title" }, "Purchase Orders"),
+      historyBox,
+    ], [el("button", { class: "secondary", type: "button", onclick: close }, "Close")], { wide: true });
+
+    try {
+      const [pos, invoices] = await Promise.all([
+        fetchAll(`/accounts/purchase-orders/?vendor=${vendor.id}`),
+        fetchAll(`/accounts/invoices/?vendor=${vendor.id}`),
+      ]);
+      const totalInvoiced = invoices.reduce((s, i) => s + Number(i.total_amount), 0);
+      const totalPaid = invoices.reduce((s, i) => s + Number(i.paid_amount), 0);
+      const totalDue = invoices.reduce((s, i) => s + Number(i.due_amount), 0);
+
+      summaryBox.innerHTML = "";
+      summaryBox.appendChild(detailGrid([
+        ["Purchase Orders", String(pos.length)],
+        ["Total Invoiced", fmtMoney(totalInvoiced)],
+        ["Total Paid", fmtMoney(totalPaid)],
+        ["Total Due", fmtMoney(totalDue)],
+      ]));
+
+      historyBox.innerHTML = "";
+      if (!pos.length) {
+        historyBox.appendChild(el("p", { class: "muted" }, "No purchase orders yet from this vendor."));
+      } else {
+        pos.forEach(po => historyBox.appendChild(renderPOSummary(po)));
+      }
+    } catch (e) {
+      summaryBox.textContent = "Could not load summary: " + e.message;
+      historyBox.textContent = "";
+    }
+  }
+
+  crudPanel(document.getElementById("panel"), {
+    title: "Vendors / Suppliers",
+    endpoint: "/master/vendors/",
+    columns: [
+      { key: "company_name", label: "Company" },
+      { key: "contact_person", label: "Contact" },
+      { key: "phone", label: "Phone" },
+      { key: "payment_terms", label: "Terms" },
+      { render: v => badge(v.is_active ? "Active" : "Inactive"), label: "Status" },
+    ],
+    fields: [
+      { name: "company_name", label: "Company Name", required: true },
+      { name: "contact_person", label: "Contact Person" },
+      { name: "phone", label: "Phone", required: true },
+      { name: "email", label: "Email" },
+      { name: "gst_number", label: "GST Number" },
+      { name: "payment_terms", label: "Payment Terms", type: "select", choices: ["NET_15", "NET_30", "NET_45", "COD", "ADVANCE"] },
+      { name: "bank_details", label: "Bank Details", type: "textarea" },
+    ],
+    editable: true,
+    onView: viewVendorDetail,
+  });
+</script>
+{% endblock %}

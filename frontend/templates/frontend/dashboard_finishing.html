@@ -1,0 +1,46 @@
+{% extends "frontend/base.html" %}
+{% block title %}Finishing - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Finishing & Dispatch Dashboard</h2>
+  <p class="page-subtitle">Overview of pieces received from Production, finishing operations, and dispatch.</p>
+
+  <div class="grid grid-4" id="stat-cards"></div>
+
+  <div class="card">
+    <h3>Quick Links</h3>
+    <div class="form-inline">
+      <a class="btn secondary" href="/finishing/operations/">🧵 Finishing Operations</a>
+      <a class="btn secondary" href="/finishing/dispatch/">🚚 Dispatch</a>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["FINISHING_SUPERVISOR"]);
+  renderShell("finishing", "Finishing & Dispatch");
+
+  async function loadStats() {
+    const cards = document.getElementById("stat-cards");
+    const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
+      el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
+    ]);
+    try {
+      const receipts = await fetchAll("/finishing/receipts/");
+      const totalReceived = receipts.reduce((s, r) => s + r.quantity_sent, 0);
+      cards.appendChild(stat("Pieces Received from Production", totalReceived));
+    } catch (e) {}
+    try {
+      const ops = await fetchAll("/finishing/operations/");
+      cards.appendChild(stat("Finishing Operations", ops.length));
+      cards.appendChild(stat("Pending / In Progress", ops.filter(o => o.status !== "COMPLETED").length, "warning"));
+    } catch (e) {}
+    try {
+      const dispatch = await fetchAll("/finishing/dispatch/");
+      cards.appendChild(stat("Pending Dispatch", dispatch.filter(d => d.status === "PENDING").length, "danger"));
+      cards.appendChild(stat("Dispatched", dispatch.filter(d => d.status === "DISPATCHED" || d.status === "DELIVERED").length, "success"));
+    } catch (e) {}
+  }
+  loadStats();
+</script>
+{% endblock %}

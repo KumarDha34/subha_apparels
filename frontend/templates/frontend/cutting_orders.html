@@ -1,0 +1,390 @@
+{% extends "frontend/base.html" %}
+{% block title %}Cutting Orders - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Cutting Orders</h2>
+  <p class="page-subtitle">One cutting order per customer order — every colour/product roll issued for it is grouped here. Receive the fabric, then <strong>Start to Cut</strong> each colour: enter the lay and bundles are created automatically (one bundle per cut position, each = number of layers). The cutting master can cut multiple colour rolls from the same order together.</p>
+
+  <div class="form-inline" style="margin-bottom:0.8rem;">
+    <input id="search" type="text" placeholder="Search — order, company, product, colour…" style="max-width:420px;" />
+  </div>
+  <div id="groups-wrap"><p class="muted">Loading…</p></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["CUTTING_SUPERVISOR"]);
+  renderShell("cutting-orders-list", "Cutting Orders");
+
+  let SIZES = [];
+  let ORDERS = [];
+  const orderCache = new Map();
+
+  async function getOrder(id) {
+    if (!orderCache.has(id)) orderCache.set(id, await apiGet(`/orders/${id}/`));
+    return orderCache.get(id);
+  }
+  
+  function findColorEntry(orderData, c) {
+    const item = (orderData.items || []).find(i => i.id === c.order_item);
+    if (!item) return null;
+    let ce = item.colors.find(x => (x.rolls || []).includes(c.fabric_issued));
+    if (!ce && c.color != null) ce = item.colors.find(x => x.color === c.color);
+    return ce ? { item, colorEntry: ce } : null;
+  }
+
+  function usageFraction(instr) {
+    const t = (instr || "").toLowerCase();
+    let m;
+    if (/\bhalf\b/.test(t)) return 0.5;
+    if (/\bquarter\b/.test(t)) return 0.25;
+    if (/\bthird\b/.test(t)) return 1 / 3;
+    if ((m = t.match(/(\d+(?:\.\d+)?)\s*%/))) return Math.min(1, Number(m[1]) / 100);
+    if ((m = t.match(/(\d+)\s*\/\s*(\d+)\s*roll/))) return Number(m[1]) / Number(m[2]);
+    return null;
+  }
+  
+  function suggestionFor(c) {
+    const f = c.half_roll ? 0.5 : usageFraction(c.cutting_instruction);
+    if (!f) return null;
+    const issued = Number(c.fabric_issued_quantity) || 0;
+    const useM = +(issued * f).toFixed(2);
+    const returnM = +(issued - useM).toFixed(2);
+    const avg = Number(c.approved_average) || 0;
+    const pcs = avg ? Math.floor(useM / avg) : null;
+    return { f, useM, returnM, pcs };
+  }
+
+  async function doAction(c, action, body) {
+    try { await apiPost(`/cutting/cutting-orders/${c.id}/${action}/`, body || {}); await refresh(); }
+    catch (e) { notify.error(e.message); }
+  }
+  
+  const receive = c => doAction(c, "receive");
+  const complete = c => doAction(c, "complete_cutting");
+  
+  async function returnFabric(c) {
+    const q = prompt(`Return unused fabric to Store (max ${c.remaining_quantity} m):`);
+    if (q === null || !q) return;
+    doAction(c, "return_fabric", { quantity: Number(q) });
+  }
+  
+  async function receiveAll(cos) {
+    const pending = cos.filter(c => c.status === "FABRIC_ISSUED");
+    for (const c of pending) { 
+        try { await apiPost(`/cutting/cutting-orders/${c.id}/receive/`, {}); } 
+        catch (e) { notify.error(e.message); } 
+    }
+    await refresh();
+  }
+
+  function cuttingPlan(c, sizeRows, isRatio) {
+    if (!isRatio) {
+      const ordered = sizeRows.reduce((s, r) => s + (Number(r.ordered) || 0), 0);
+      if (!ordered) return null;
+      const dist = sizeRows.filter(r => Number(r.ordered) > 0).map(r => `${r.size_name} ${r.ordered}`);
+      return el("div", { class: "mode-banner mode-fixed" }, [el("strong", {}, "Order quantity (fixed): "),
+        el("strong", {}, `${ordered} pieces`), ` — ${dist.join(" · ")}. Cut to these counts; no calculation needed.`]);
+    }
+    const avg = Number(c.approved_average) || 0;
+    const avail = Number(c.remaining_quantity) || Number(c.fabric_issued_quantity) || 0;
+    if (!avg || !avail) return null;
+    const totalPieces = Math.floor(avail / avg);
+    const parts = [`Fabric available ${avail} m ÷ approved avg ${avg} = `, el("strong", {}, `${totalPieces} pieces`), "."];
+    const ratioSum = sizeRows.reduce((s, r) => s + (Number(r.ratio) || 0), 0);
+    if (ratioSum > 0) {
+      const dist = sizeRows.filter(r => Number(r.ratio) > 0)
+        .map(r => `${r.size_name} ${Math.round((Number(r.ratio) / ratioSum) * totalPieces)}`);
+      parts.push(` Ratio split → ${dist.join(" · ")}.`);
+    }
+    return el("div", { class: "mode-banner mode-ratio" }, [el("strong", {}, "Suggested plan: "), ...parts]);
+  }
+
+  async function openLay(c) {
+    const orderData = c.order ? await getOrder(c.order) : null;
+    const found = orderData ? findColorEntry(orderData, c) : null;
+    const isRatio = c.order_type === "RATIO_BASED";
+    const sizeRows = found ? found.colorEntry.size_lines.map(sl => ({ size: sl.size, size_name: sl.size_name, ordered: sl.quantity, ratio: sl.ratio_part }))
+                           : SIZES.map(s => ({ size: s.id, size_name: s.name }));
+    // A cut can have several lays (Layer 1, Layer 2, …), each with its own
+    // length, number of layers and per-size pieces-per-layer. Ratio orders
+    // pre-fill the first lay from the size ratio.
+    function blankLay(prefill) {
+      const perLayer = {};
+      if (prefill && isRatio) sizeRows.forEach(sr => { if (sr.ratio != null) perLayer[sr.size] = String(sr.ratio); });
+      return { layer_length: "", no_of_layers: "", perLayer, _cells: {} };
+    }
+    const state = { lays: [blankLay(true)], remarks: "" };
+    const sug = suggestionFor(c);
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const laysWrap = el("div", {});
+    const summary = el("div", { class: "muted", style: "margin:0.6rem 0;" });
+
+    function totals() {
+      let pieces = 0, bundles = 0, fabric = 0;
+      state.lays.forEach(lay => {
+        const perSum = sizeRows.reduce((s, sr) => s + (Number(lay.perLayer[sr.size]) || 0), 0);
+        const n = Number(lay.no_of_layers) || 0, len = Number(lay.layer_length) || 0;
+        pieces += perSum * n; bundles += perSum; fabric += len * n;
+      });
+      return { pieces, bundles, fabric };
+    }
+    function upd() {
+      state.lays.forEach(lay => {
+        const n = Number(lay.no_of_layers) || 0;
+        sizeRows.forEach(sr => { if (lay._cells[sr.size]) lay._cells[sr.size].textContent = String((Number(lay.perLayer[sr.size]) || 0) * n); });
+      });
+      const t = totals();
+      summary.innerHTML = "";
+      summary.append(el("strong", {}, `Total: ${t.pieces} pcs · ${t.bundles} bundles · ${t.fabric.toFixed(2)} m fabric`),
+        ` (remaining issued: ${c.remaining_quantity} m).`);
+    }
+    function renderLays() {
+      laysWrap.innerHTML = "";
+      state.lays.forEach((lay, li) => {
+        lay._cells = {};
+        const table = el("table", { class: "cut-sheet" });
+        table.appendChild(el("thead", {}, el("tr", {}, ["Size", isRatio ? "Ratio" : "Ordered", "Pieces / layer", "Total (× layers)"].map(h => el("th", {}, h)))));
+        const tb = el("tbody");
+        sizeRows.forEach(sr => {
+          const input = numberInput(lay.perLayer[sr.size] ?? "", v => { lay.perLayer[sr.size] = v; upd(); }, { min: "0", step: "1", class: "cut-input", placeholder: "0" });
+          const tc = el("td", { class: "cut-info" }, "0"); lay._cells[sr.size] = tc;
+          tb.appendChild(el("tr", {}, [el("td", { class: "cut-size" }, sr.size_name), el("td", { class: "cut-info" }, isRatio ? String(sr.ratio ?? "—") : String(sr.ordered ?? "—")), el("td", {}, input), tc]));
+        });
+        table.appendChild(tb);
+        laysWrap.appendChild(el("div", { class: "subcard level-color", style: "margin-bottom:0.7rem;" }, [
+          el("div", { class: "subcard-header" }, [
+            el("span", { class: "subcard-title" }, `Layer ${li + 1}`),
+            removeIconBtn("Remove layer", state.lays.length <= 1, () => { state.lays.splice(li, 1); renderLays(); upd(); }),
+          ]),
+          el("div", { class: "cut-fields" }, [
+            field("Layer Length (m)", numberInput(lay.layer_length, v => { lay.layer_length = v; upd(); }, { min: "0", step: "0.01", placeholder: "e.g. 1.7" })),
+            field("No. of Layers", numberInput(lay.no_of_layers, v => { lay.no_of_layers = v; upd(); }, { min: "1", step: "1", placeholder: "e.g. 10" })),
+          ]),
+          el("div", { class: "section-title" }, "Pieces per layer (per size)"),
+          el("div", { class: "cut-sheet-wrap" }, table),
+        ]));
+      });
+      upd();
+    }
+    renderLays();
+    const addLayBtn = el("button", { class: "secondary", type: "button", onclick: () => { state.lays.push(blankLay(false)); renderLays(); } }, "+ Add Layer");
+
+    const submit = async () => {
+      err.style.display = "none";
+      const lays = state.lays.map(lay => ({
+        layer_length: Number(lay.layer_length), no_of_layers: Number(lay.no_of_layers),
+        sizes: Object.entries(lay.perLayer).filter(([, v]) => v && Number(v) > 0).map(([size, v]) => ({ size: Number(size), pieces_per_layer: Number(v) })),
+      }));
+      for (const [i, lay] of lays.entries()) {
+        if (!lay.layer_length || lay.layer_length <= 0 || !lay.no_of_layers || lay.no_of_layers <= 0 || !lay.sizes.length) {
+          err.textContent = `Layer ${i + 1}: enter length, number of layers, and pieces per layer for at least one size.`; err.style.display = "block"; return;
+        }
+      }
+      const t = totals();
+      if (t.fabric > Number(c.remaining_quantity) + 0.001) {
+        err.textContent = `These layers need ${t.fabric.toFixed(2)} m but only ${c.remaining_quantity} m of the issued fabric is left.`; err.style.display = "block"; return;
+      }
+      try {
+        for (const lay of lays) {
+          await apiPost(`/cutting/cutting-orders/${c.id}/record_layer/`, { layer_length: lay.layer_length, no_of_layers: lay.no_of_layers, remarks: state.remarks || "", sizes: lay.sizes });
+        }
+        closeCrudModal(); notify.success(`${lays.length} layer(s) recorded — bundles auto-created.`); await refresh();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`✂️ Start to Cut — ${c.cutting_number} · ${c.color_name}`, [
+      c.cutting_instruction ? el("div", { class: "mode-banner mode-ratio" }, [el("strong", {}, "Instruction: "), c.cutting_instruction]) : null,
+      sug ? el("div", { class: "mode-banner mode-fixed" }, [el("strong", {}, "Half-roll suggestion: "),
+        `use ~${(sug.f * 100).toFixed(0)}% of this roll ≈ ${sug.useM} m, return ~${sug.returnM} m${sug.pcs != null ? ` (≈ ${sug.pcs} pcs)` : ""}.`]) : null,
+      cuttingPlan(c, sizeRows, isRatio),
+      el("p", { class: "muted", style: "margin:0.2rem 0;" }, "Add one row per lay — e.g. Layer 1 (10 layers), Layer 2 (6 layers), Layer 3 (2 layers). Each lay auto-creates its own bundles (bundle = number of layers)."),
+      err, laysWrap,
+      el("div", { class: "form-inline" }, [addLayBtn]), summary,
+      field("Cut Remarks (optional)", el("input", { type: "text", oninput: e => state.remarks = e.target.value })),
+    ], [el("button", { type: "button", onclick: submit }, "Record Layers & Auto-create Bundles"),
+        el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")], { wide: true });
+  }
+
+  async function openBundles(c) {
+    const box = el("div", { class: "muted" }, "Loading…");
+    showCrudModal(`📦 Bundles — ${c.cutting_number}`, [box], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+    try {
+      const bundles = await fetchAll(`/cutting/bundles/?cutting_order=${c.id}`);
+      box.innerHTML = "";
+      if (!bundles.length) { box.appendChild(el("p", { class: "muted" }, "No bundles yet — Start to Cut to create them.")); return; }
+      dataTable(box, {
+        columns: [
+          { label: "Bundle #", key: "bundle_number" }, { label: "Color", key: "color_name" }, { label: "Size", key: "size_name" },
+          { label: "Qty", key: "quantity", value: b => Number(b.quantity) }, { label: "Status", key: "status", render: b => badge(b.status) },
+        ], rows: bundles, pageSize: 8, searchable: bundles.length > 8,
+      });
+    } catch (e) { box.innerHTML = `<p class="error-msg">${e.message}</p>`; }
+  }
+
+  async function approveOverride(c) {
+    const ok = await showConfirm(`Approve over-consumption on ${c.cutting_number}? Actual ${c.actual_average} m/pc exceeds the approved ${c.approved_average} m/pc.`);
+    if (!ok) return;
+    doAction(c, "approve_override", { approved: true, remarks: "Approved from cutting screen." });
+  }
+
+  // ✅ NEW: Send to Production function
+  async function sendToProduction(c) {
+    try {
+        await apiPost(`/cutting/cutting-orders/${c.id}/send_to_production/`, {});
+        notify.success(`✅ Bundles sent to Production for ${c.cutting_number}`);
+        await refresh();
+    } catch (e) {
+        notify.error(e.message || "Failed to send bundles to Production");
+    }
+  }
+
+  // ✅ NEW: Send All to Production function
+  async function sendAllToProduction(cos) {
+    const total = cos.reduce((sum, c) => sum + (c.unsent_bundle_count || 0), 0);
+    const ok = await showConfirm(`Send all ${total} bundles from this order to Production?`);
+    if (!ok) return;
+    
+    let sent = 0;
+    for (const c of cos) {
+        if (c.status === "COMPLETED" && c.unsent_bundle_count > 0) {
+            try {
+                await apiPost(`/cutting/cutting-orders/${c.id}/send_to_production/`, {});
+                sent += c.unsent_bundle_count;
+            } catch (e) {
+                notify.error(`Failed for ${c.cutting_number}: ${e.message}`);
+            }
+        }
+    }
+    notify.success(`✅ ${sent} bundles sent to Production`);
+    await refresh();
+  }
+
+  function actionsFor(c) {
+    const acts = [];
+    const isAdmin = Auth.getRole() === "ADMIN";
+    
+    if (c.status === "FABRIC_ISSUED") acts.push(el("button", { type: "button", onclick: () => receive(c) }, "Receive"));
+    
+    if (c.status === "RECEIVED" || c.status === "CUTTING") {
+        acts.push(el("button", { type: "button", onclick: () => openLay(c) }, "✂️ Start to Cut"));
+        if (c.average_status === "DONT_CUT" && !c.average_override_approved && isAdmin) {
+            acts.push(el("button", { class: "warning", type: "button", onclick: () => approveOverride(c) }, "Approve Over-consumption"));
+        }
+        if (c.bundle_count > 0) acts.push(el("button", { class: "success", type: "button", onclick: () => complete(c) }, "Complete"));
+        if (Number(c.remaining_quantity) > 0) acts.push(el("button", { class: "secondary", type: "button", onclick: () => returnFabric(c) }, "Return"));
+    }
+    
+    // "Send to Production" — only while there are bundles still to send.
+    // Once every bundle is sent, this disappears automatically.
+    if (c.status === "COMPLETED" && c.unsent_bundle_count > 0) {
+        acts.push(el("button", { class: "success", type: "button", onclick: () => sendToProduction(c) }, `📦 Send ${c.unsent_bundle_count} to Production`));
+    }
+    
+    if (c.bundle_count > 0) acts.push(el("button", { class: "secondary", type: "button", onclick: () => openBundles(c) }, `Bundles (${c.bundle_count})`));
+    
+    return el("div", { class: "form-inline" }, acts);
+  }
+
+  function groupOrders(list) {
+    const groups = new Map();
+    list.forEach(c => {
+      const key = c.order != null ? `O${c.order}` : `C${c.id}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    });
+    return groups;
+  }
+
+  function matchGroup(cos, q) {
+    if (!q) return true;
+    const hay = cos.map(c => `${c.order_number} ${c.party_name} ${c.product_code} ${c.product_name} ${c.color_name} ${c.status}`).join(" ").toLowerCase();
+    return hay.includes(q.toLowerCase());
+  }
+
+  function renderGroup(cos) {
+    const head = cos[0];
+    const products = [...new Set(cos.map(c => c.product_code ? `${c.product_code} — ${c.product_name}` : c.product_name).filter(Boolean))];
+    const colours = [...new Set(cos.map(c => c.color_name).filter(Boolean))];
+    const isRatio = head.order_type === "RATIO_BASED";
+    const anyPending = cos.some(c => c.status === "FABRIC_ISSUED");
+    const sug = suggestionFor(head);
+    
+    // Group-level "Send All": how many bundles across this order are still unsent.
+    const allCompleted = cos.every(c => c.status === "COMPLETED");
+    const unsentBundles = cos.reduce((sum, c) => sum + (c.unsent_bundle_count || 0), 0);
+
+    const meta = el("div", { class: "detail-grid", style: "margin:0.4rem 0 0.8rem;" }, [
+      field("Order", el("strong", {}, head.order_number || "—")),
+      field("Company", head.party_name || "—"),
+      field("Product(s)", products.join(" · ") || "—"),
+      field("Colours", colours.join(", ") || "—"),
+      isRatio ? field("Ratio", head.quantity_display || "—") : field("Ordered Qty", head.quantity_display || "—"),
+    ]);
+
+    const table = el("table", { class: "data-table" });
+    table.appendChild(el("thead", {}, el("tr", {}, ["Cut #", "Colour", "Fabric", isRatio ? "Ratio" : "Qty", "Issued m", "Used m", "Remaining", "Avg", "Status", "Actions"].map(h => el("th", {}, h)))));
+    const tb = el("tbody");
+    cos.forEach(c => {
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, c.cutting_number),
+        el("td", {}, c.color_name || "—"),
+        el("td", {}, `${c.fabric_type_name || "?"}`),
+        el("td", {}, c.quantity_display || "—"),
+        el("td", {}, String(c.fabric_issued_quantity)),
+        el("td", {}, String(c.fabric_used_quantity || 0)),
+        el("td", {}, String(c.remaining_quantity)),
+        el("td", {}, badge(c.average_status)),
+        el("td", {}, badge(c.status)),
+        el("td", {}, actionsFor(c)),
+      ]));
+    });
+    table.appendChild(tb);
+
+    // ✅ FIXED: Header with both buttons
+    const header = el("div", { class: "crud-header" }, [
+      el("h3", {}, `Cutting Order — ${head.order_number || head.cutting_number}`),
+      anyPending ? el("button", { type: "button", onclick: () => receiveAll(cos) }, "Receive All Fabric") : null,
+      // "Send All to Production" — only while some bundles are still unsent.
+      (allCompleted && unsentBundles > 0) ? el("button", { class: "success", type: "button", onclick: () => sendAllToProduction(cos) }, `📦 Send All ${unsentBundles} to Production`) : null,
+    ]);
+
+    const banners = [];
+    if (head.cutting_instruction) banners.push(el("div", { class: "mode-banner mode-ratio" }, [el("strong", {}, "Cutting instruction: "), head.cutting_instruction]));
+    if (sug) banners.push(el("div", { class: "mode-banner mode-fixed" }, [el("strong", {}, "Half-roll: "),
+      `use ~${(sug.f * 100).toFixed(0)}% of each roll and return the rest.`]));
+
+    return el("div", { class: "card" }, [header, ...banners, meta, el("div", { style: "overflow-x:auto;" }, table)]);
+  }
+
+  // ✅ FIXED: render() function - removed duplicate code
+  function render() {
+    const q = document.getElementById("search").value.trim();
+    const wrap = document.getElementById("groups-wrap");
+    wrap.innerHTML = "";
+    const groups = groupOrders(ORDERS);
+    let shown = 0;
+    
+    for (const cos of groups.values()) {
+      if (!matchGroup(cos, q)) continue;
+      wrap.appendChild(renderGroup(cos));
+      shown++;
+    }
+    
+    if (!shown) {
+      wrap.appendChild(el("p", { class: "muted" }, ORDERS.length ? "No cutting orders match your search." : "No cutting orders yet — Store issues fabric to open them."));
+    }
+  }
+
+  async function refresh() {
+    try {
+      ORDERS = await fetchAll("/cutting/cutting-orders/");
+      render();
+    } catch (e) { document.getElementById("groups-wrap").innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  (async function init() {
+    SIZES = await fetchAll("/master/sizes/?is_active=true");
+    document.getElementById("search").addEventListener("input", render);
+    await refresh();
+  })();
+</script>
+{% endblock %}

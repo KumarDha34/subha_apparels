@@ -1,0 +1,79 @@
+{% extends "frontend/base.html" %}
+{% block title %}Quality Check - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Finishing — Quality Check</h2>
+  <p class="page-subtitle">Pieces received from Production (and back from Washing / Printing / Embroidery). Finishing only inspects: mark each batch Pass, Fail, or Alter. Washing/printing/etc. are handled by Production ▸ Send to Process.</p>
+
+  <div id="receipts-wrap"></div>
+  <div id="qc-panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["FINISHING_SUPERVISOR"]);
+  renderShell("finishing-operations", "Quality Check");
+
+  async function refreshReceipts() {
+    const wrap = document.getElementById("receipts-wrap");
+    wrap.innerHTML = "Loading...";
+    try {
+      const receipts = await fetchAll("/finishing/receipts/");
+      wrap.innerHTML = "";
+      const body = el("div", {});
+      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Received from Production"), body]));
+      dataTable(body, {
+        columns: [
+          { label: "Order", key: "order_number" }, { label: "Quantity Sent", key: "quantity_sent", value: r => Number(r.quantity_sent) },
+          { label: "Sent At", key: "sent_at", render: r => (r.sent_at ? r.sent_at.slice(0, 16).replace("T", " ") : "—") },
+          { label: "Remarks", render: r => r.remarks || "—" },
+        ], rows: receipts, pageSize: 8, initialSort: { key: "sent_at", dir: "desc" },
+        searchPlaceholder: "Search received…", emptyText: "Nothing received yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+  refreshReceipts();
+
+  // Alteration rework loop: record how many altered pieces passed / failed
+  // re-inspection after rework, until none are pending.
+  function openRework(q) {
+    const passI = numberInput("", () => {}, { min: "0", step: "1" });
+    const failI = numberInput("", () => {}, { min: "0", step: "1" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      try {
+        await apiPost(`/finishing/quality-checks/${q.id}/record_rework/`, { passed: Number(passI.value || 0), failed: Number(failI.value || 0) });
+        closeCrudModal(); notify.success("Rework recorded."); qcPanel.refresh();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`Rework — ${q.order_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `${q.alteration_pending} of ${q.quantity_altered} altered piece(s) still pending. How did rework turn out?`),
+      err, field("Passed after rework", passI), field("Scrapped after rework", failI),
+    ], [el("button", { type: "button", onclick: submit }, "Save"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
+  }
+
+  const qcPanel = crudPanel(document.getElementById("qc-panel"), {
+    title: "Final Quality Checks (Pass / Fail / Alter)",
+    endpoint: "/finishing/quality-checks/",
+    columns: [
+      { key: "order_number", label: "Order #" },
+      { key: "quantity_checked", label: "Checked" },
+      { key: "quantity_passed", label: "Passed" },
+      { key: "quantity_altered", label: "Altered" },
+      { key: "quantity_rejected", label: "Failed" },
+      { label: "Rework (✓/✗/pending)", sortable: false, render: q => (q.quantity_altered
+          ? `${q.quantity_reworked_passed} / ${q.quantity_reworked_failed} / ${q.alteration_pending}` : "—") },
+      { label: "Final Good", render: q => q.final_good },
+      { label: "Action", sortable: false, render: q => (q.alteration_pending > 0
+          ? el("button", { class: "secondary", type: "button", onclick: () => openRework(q) }, "Record Rework") : "—") },
+    ],
+    fields: [
+      { name: "order", label: "Order", type: "select", optionsEndpoint: "/orders/?status=IN_FINISHING", optionsLabel: "order_number", required: true },
+      { name: "quantity_checked", label: "Quantity Checked", type: "number", required: true },
+      { name: "quantity_passed", label: "Passed", type: "number", required: true },
+      { name: "quantity_altered", label: "Sent for Alteration / Rework", type: "number" },
+      { name: "quantity_rejected", label: "Failed / Rejected", type: "number" },
+      { name: "notes", label: "Notes", type: "textarea" },
+    ],
+  });
+</script>
+{% endblock %}

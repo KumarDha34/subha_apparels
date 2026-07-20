@@ -1,0 +1,349 @@
+{% extends "frontend/base.html" %}
+{% block title %}Stock - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Stock</h2>
+  <p class="page-subtitle">Everything Store holds, in one place. Pick a tab, then issue straight from a row — fabric to Cutting, accessories to an operator. Received / issued / available and full history are tracked for every item.</p>
+
+  <div id="tabs"></div>
+  <div id="fabric-panel"></div>
+  <div id="accessory-panel"></div>
+  <div id="purchases-panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-stock", "Stock");
+
+  const ELIGIBLE_ORDER_STATUSES = ["CONFIRMED", "IN_CUTTING", "IN_PRODUCTION", "IN_FINISHING"];
+  const PO_TYPE_LABEL = { ORDER_SPECIFIC: "Order-Specific", BULK: "Bulk", CUSTOMER_SUPPLIED: "Customer-Supplied" };
+  const TXN_TYPE_LABEL = { RECEIPT: "Received", ISSUE: "Used (Issued)", WASTAGE: "Wastage", RETURN: "Returned", ADJUSTMENT: "Adjusted" };
+  const TABS = [["fabric", "🧵 Fabric"], ["accessory", "🧷 Accessory"], ["purchases", "🧾 Purchases"]];
+
+  let MASTER = { orders: [], operators: [] };
+  let PURCHASES = [];
+  let active = "fabric";
+
+  async function loadMaster() {
+    const [orders, operators] = await Promise.all([
+      fetchAll("/orders/"),
+      fetchAll("/operators/operators/?is_active=true").catch(() => []),
+    ]);
+    MASTER.orders = orders.filter(o => ELIGIBLE_ORDER_STATUSES.includes(o.status));
+    MASTER.operators = operators;
+  }
+
+  /** Order dropdown options. `preferIds` (order ids) float to the top — used
+   *  to surface the order an accessory was purchased for. */
+  function orderOptions(preferIds) {
+    const map = new Map();
+    MASTER.orders.forEach(o => map.set(String(o.id), `${o.order_number} — ${o.party_name}`));
+    PURCHASES.forEach(p => { if (p.related_order && !map.has(String(p.related_order))) map.set(String(p.related_order), p.order_number || ("Order #" + p.related_order)); });
+    let entries = [...map.entries()];
+    if (preferIds && preferIds.length) {
+      const pref = preferIds.map(String);
+      entries.sort((a, b) => (pref.includes(b[0]) ? 1 : 0) - (pref.includes(a[0]) ? 1 : 0));
+    }
+    return entries.map(([value, label]) => ({ value, label }));
+  }
+
+  /* ============================ history ============================ */
+  function historySummary(txns) {
+    const totals = {};
+    txns.forEach(t => { totals[t.transaction_type] = (totals[t.transaction_type] || 0) + Number(t.quantity); });
+    const pairs = Object.entries(TXN_TYPE_LABEL).filter(([t]) => totals[t] !== undefined).map(([t, l]) => [l, String(totals[t])]);
+    return pairs.length ? detailGrid(pairs) : null;
+  }
+  function historyTable(txns) {
+    if (!txns.length) return el("p", { class: "muted" }, "No transactions recorded yet.");
+    const table = el("table");
+    table.appendChild(el("thead", {}, el("tr", {}, ["Type", "Qty", "Reference", "Date", "By"].map(h => el("th", {}, h)))));
+    const tb = el("tbody");
+    txns.forEach(t => tb.appendChild(el("tr", {}, [
+      el("td", {}, badge(t.transaction_type)), el("td", {}, String(t.quantity)),
+      el("td", {}, t.reference || "—"), el("td", {}, t.transaction_date), el("td", {}, t.created_by_name || "—"),
+    ])));
+    table.appendChild(tb);
+    return table;
+  }
+  async function stockHistory(title, detail, url) {
+    const box = el("div", { class: "muted" }, "Loading history…");
+    showCrudModal(title, [detailGrid(detail), el("div", { class: "section-title" }, "Transaction History"), box],
+      [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+    try {
+      const txns = await fetchAll(url); box.innerHTML = "";
+      const s = historySummary(txns); if (s) box.appendChild(s);
+      box.appendChild(historyTable(txns));
+    } catch (e) { box.textContent = "Could not load history: " + e.message; }
+  }
+  const fabricHistory = s => stockHistory(`🧵 ${s.fabric_type_name} / ${s.color_name}`, [
+    ["Roll #", s.roll_number || "—"], ["Received (actual)", `${s.total_received || 0} ${s.unit}`],
+    ["Issued to Cutting", `${s.total_issued || 0} ${s.unit}`], ["Returned", `${s.total_returned || 0} ${s.unit}`],
+    ["Wastage", `${s.total_wastage || 0} ${s.unit}`], ["Available (remaining)", `${s.available_quantity} ${s.unit}`],
+    ["Supplied By (customer)", s.supplied_by_party_name || "—"], ["Status", s.is_low_stock ? badge("LOW") : badge("OK")],
+  ], `/store/transactions/?fabric_stock=${s.id}`);
+  const accessoryHistory = s => stockHistory(`🧷 ${s.accessory_label}`, [
+    ["Unit", s.unit || "—"], ["Received (actual)", `${s.total_received || 0} ${s.unit || ""}`],
+    ["Issued to Operators", `${s.total_issued || 0} ${s.unit || ""}`], ["Returned", `${s.total_returned || 0} ${s.unit || ""}`],
+    ["Available (remaining)", String(s.available_quantity)], ["Supplied By (customer)", s.supplied_by_party_name || "—"],
+    ["Status", s.is_low_stock ? badge("LOW") : badge("OK")],
+  ], `/store/accessory-transactions/?accessory_stock=${s.id}`);
+
+  /* ==================== issue: fabric → cutting ==================== */
+  function issueFabricModal(s) {
+    if (!MASTER.orders.length) return showCrudModal("Issue Fabric to Cutting",
+      [el("p", { class: "muted" }, "No confirmed orders yet — ask Merchandising to confirm an order first.")],
+      [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")]);
+    const st = { order: "", quantity: "", cutting_date: new Date().toISOString().slice(0, 10), remarks: "" };
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      err.style.display = "none";
+      if (!st.order) { err.textContent = "Select an order."; err.style.display = "block"; return; }
+      if (!st.quantity || Number(st.quantity) <= 0 || Number(st.quantity) > Number(s.available_quantity)) {
+        err.textContent = `Enter a quantity between 0 and ${s.available_quantity} (available).`; err.style.display = "block"; return; }
+      try {
+        await apiPost("/cutting/cutting-orders/", { order: Number(st.order), fabric_issued: s.id, fabric_issued_quantity: Number(st.quantity), cutting_date: st.cutting_date || null, remarks: st.remarks || "" });
+        closeCrudModal(); notify.success("Fabric issued to Cutting."); refreshFabric();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`🧵 Issue — ${s.fabric_type_name} / ${s.color_name} (${s.roll_number || "roll"})`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Available: ${s.available_quantity} ${s.unit}. Fabric is always issued for a specific order.`),
+      err,
+      field("Order", selectEl({ onchange: e => st.order = e.target.value }, MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), st.order, "Select order")),
+      field("Quantity to issue", numberInput(st.quantity, v => st.quantity = v, { min: "0", step: "0.01", placeholder: String(s.available_quantity) })),
+      field("Cutting Date", el("input", { type: "date", value: st.cutting_date, oninput: e => st.cutting_date = e.target.value })),
+      field("Remarks", el("textarea", { oninput: e => st.remarks = e.target.value })),
+    ], [el("button", { type: "button", onclick: submit }, "Issue to Cutting"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
+  }
+
+  /* ================== issue: accessory → operator (order-aware) ================== */
+  function issueAccessoryModal(s) {
+    if (!MASTER.operators.length) return showCrudModal("Issue Accessory to Operator",
+      [el("p", { class: "muted" }, "No active operators yet — add operators first.")],
+      [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")]);
+    // Which orders was this accessory bought specifically for? (order-specific POs)
+    const linkedIds = [...new Set(PURCHASES
+      .filter(p => p.po_type === "ORDER_SPECIFIC" && p.related_order && p.items.some(i => i.material_type === "ACCESSORY" && String(i.accessory) === String(s.accessory)))
+      .map(p => p.related_order))];
+    const st = { operator: "", quantity: "", order: linkedIds.length ? String(linkedIds[0]) : "", issued_date: new Date().toISOString().slice(0, 10), remarks: "" };
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      err.style.display = "none";
+      if (!st.operator) { err.textContent = "Select an operator."; err.style.display = "block"; return; }
+      if (!st.quantity || Number(st.quantity) <= 0 || Number(st.quantity) > Number(s.available_quantity)) {
+        err.textContent = `Enter a quantity between 0 and ${s.available_quantity} (available).`; err.style.display = "block"; return; }
+      try {
+        const body = { operator: Number(st.operator), accessory_stock: s.id, issued_quantity: Number(st.quantity), issued_date: st.issued_date || null, remarks: st.remarks || "" };
+        if (st.order) body.order = Number(st.order);
+        await apiPost("/production/operator-accessory-issues/", body);
+        closeCrudModal(); notify.success("Accessory issued to operator."); refreshAccessory();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    const orderNote = linkedIds.length
+      ? el("div", { class: "mode-banner mode-fixed" }, [el("strong", {}, "Order-specific: "), "this accessory was purchased for the order pre-selected below. Change it only if you're issuing it for a different order."])
+      : el("p", { class: "muted", style: "margin-top:-0.3rem;" }, "General stock — pick the order this issue is for (optional).");
+    showCrudModal(`🧷 Issue — ${s.accessory_label}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Available: ${s.available_quantity} ${s.unit || ""}.`),
+      err,
+      field("Operator", selectEl({ onchange: e => st.operator = e.target.value }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), st.operator, "Select operator")),
+      field("Quantity to issue", numberInput(st.quantity, v => st.quantity = v, { min: "0", step: "0.01", placeholder: String(s.available_quantity) })),
+      orderNote,
+      field("For Order", selectEl({ onchange: e => st.order = e.target.value }, orderOptions(linkedIds), st.order, "— any —")),
+      field("Issue Date", el("input", { type: "date", value: st.issued_date, oninput: e => st.issued_date = e.target.value })),
+      field("Remarks", el("textarea", { oninput: e => st.remarks = e.target.value })),
+    ], [el("button", { type: "button", onclick: submit }, "Issue to Operator"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
+  }
+
+  /* ============================ fabric panel ============================ */
+  async function refreshFabric() {
+    const panel = document.getElementById("fabric-panel");
+    panel.innerHTML = "";
+    const stockBox = el("div", { class: "muted" }, "Loading…");
+    const issuesBox = el("div", { class: "muted" }, "Loading…");
+    panel.append(
+      el("div", { class: "card" }, [el("h3", {}, "🧵 Fabric Stock"),
+        el("p", { class: "card-subtitle" }, "Each physical roll is its own row (a roll is not a unit). Issue a roll to Cutting, or view its full history."), stockBox]),
+      el("div", { class: "card" }, [el("h3", {}, "📤 Fabric Issued to Cutting"), issuesBox]));
+    try {
+      const items = await fetchAll("/store/fabric-stock/?is_active=true");
+      stockBox.innerHTML = "";
+      dataTable(stockBox, {
+        columns: [
+          { label: "Fabric Type", key: "fabric_type_name" }, { label: "Color", key: "color_name" },
+          { label: "Roll #", value: s => s.roll_number || "", render: s => s.roll_number || "—" }, { label: "Unit", key: "unit" },
+          { label: "Received", value: s => Number(s.total_received || 0), render: s => String(s.total_received || 0) },
+          { label: "Issued", value: s => Number(s.total_issued || 0), render: s => String(s.total_issued || 0) },
+          { label: "Available", key: "available_quantity", value: s => Number(s.available_quantity) },
+          { label: "Supplied By", value: s => s.supplied_by_party_name || "", render: s => s.supplied_by_party_name || "—" },
+          { label: "Status", value: s => (s.is_low_stock ? "LOW" : "OK"), render: s => (s.is_low_stock ? badge("LOW") : badge("OK")) },
+          { label: "Actions", sortable: false, render: s => el("div", { class: "form-inline" }, [
+              Number(s.available_quantity) > 0 ? el("button", { type: "button", onclick: () => issueFabricModal(s) }, "Issue to Cutting") : null,
+              el("button", { class: "secondary", type: "button", onclick: () => fabricHistory(s) }, "History")]) },
+        ], rows: items, pageSize: 12, searchPlaceholder: "Search fabric — type, color, roll…",
+        emptyText: "No fabric stock yet — it's added automatically as purchases are received.",
+      });
+    } catch (e) { stockBox.innerHTML = `<p class="error-msg">${e.message}</p>`; }
+    try {
+      const cos = await fetchAll("/cutting/cutting-orders/");
+      issuesBox.innerHTML = "";
+      dataTable(issuesBox, {
+        columns: [
+          { label: "Cutting #", key: "cutting_number" },
+          { label: "Order", value: c => c.order_number || "", render: c => c.order_number || "—" },
+          { label: "Fabric / Color", value: c => `${c.fabric_type_name || ""} ${c.color_name || ""}`, render: c => `${c.fabric_type_name || "?"} / ${c.color_name || "?"}` },
+          { label: "Issued", value: c => Number(c.fabric_issued_quantity), render: c => String(c.fabric_issued_quantity) },
+          { label: "Status", value: c => c.status, render: c => badge(c.status) },
+          { label: "Date", value: c => c.cutting_date || "", render: c => c.cutting_date || "—" },
+        ], rows: cos, pageSize: 8, initialSort: { key: "cutting_number", dir: "desc" },
+        searchPlaceholder: "Search fabric issues…", emptyText: "No fabric issued to Cutting yet.",
+      });
+    } catch (e) { issuesBox.innerHTML = `<p class="error-msg">${e.message}</p>`; }
+  }
+
+  /* ============================ accessory panel ============================ */
+  function openUsage(iss) {
+    const usedI = numberInput(iss.used_quantity ?? "", () => {}, { min: "0", step: "0.01" });
+    const piecesI = numberInput(iss.pieces_covered ?? "", () => {}, { min: "0", step: "1" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      try {
+        await apiPost(`/production/operator-accessory-issues/${iss.id}/record_usage/`, { used_quantity: Number(usedI.value || 0), pieces_covered: Number(piecesI.value || 0) });
+        closeCrudModal(); notify.success("Usage recorded."); refreshAccessory();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`Record Usage — ${iss.issue_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.5rem;" }, `Issued ${iss.issued_quantity} to ${iss.operator_name}. Enter cumulative used total and pieces covered.`),
+      err, field("Used Quantity (total so far)", usedI), field("Pieces Covered", piecesI),
+    ], [el("button", { type: "button", onclick: submit }, "Save"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
+  }
+  async function returnUnused(iss) {
+    const qty = prompt(`Quantity to return unused (max ${iss.remaining_quantity}):`);
+    if (qty === null || !qty) return;
+    try { await apiPost(`/production/operator-accessory-issues/${iss.id}/return_unused/`, { quantity: Number(qty) }); notify.success("Returned to stock."); refreshAccessory(); }
+    catch (e) { notify.error(e.message); }
+  }
+  async function refreshAccessory() {
+    const panel = document.getElementById("accessory-panel");
+    panel.innerHTML = "";
+    const stockBox = el("div", { class: "muted" }, "Loading…");
+    const issuesBox = el("div", { class: "muted" }, "Loading…");
+    panel.append(
+      el("div", { class: "card" }, [el("h3", {}, "🧷 Accessory Stock"),
+        el("p", { class: "card-subtitle" }, "Issue an accessory to an operator. If it was bought for a specific order, that order is pre-selected automatically."), stockBox]),
+      el("div", { class: "card" }, [el("h3", {}, "🧷 Accessories Issued to Operators — usage tracking"), issuesBox]));
+    try {
+      const items = await fetchAll("/store/accessory-stock/?is_active=true");
+      stockBox.innerHTML = "";
+      dataTable(stockBox, {
+        columns: [
+          { label: "Accessory", key: "accessory_label" }, { label: "Unit", key: "unit", render: s => s.unit || "—" },
+          { label: "Received", value: s => Number(s.total_received || 0), render: s => String(s.total_received || 0) },
+          { label: "Issued", value: s => Number(s.total_issued || 0), render: s => String(s.total_issued || 0) },
+          { label: "Available", key: "available_quantity", value: s => Number(s.available_quantity) },
+          { label: "Supplied By", value: s => s.supplied_by_party_name || "", render: s => s.supplied_by_party_name || "—" },
+          { label: "Status", value: s => (s.is_low_stock ? "LOW" : "OK"), render: s => (s.is_low_stock ? badge("LOW") : badge("OK")) },
+          { label: "Actions", sortable: false, render: s => el("div", { class: "form-inline" }, [
+              Number(s.available_quantity) > 0 ? el("button", { type: "button", onclick: () => issueAccessoryModal(s) }, "Issue to Operator") : null,
+              el("button", { class: "secondary", type: "button", onclick: () => accessoryHistory(s) }, "History")]) },
+        ], rows: items, pageSize: 12, searchPlaceholder: "Search accessory stock…",
+        emptyText: "No accessory stock yet — it's added automatically as purchases are received.",
+      });
+    } catch (e) { stockBox.innerHTML = `<p class="error-msg">${e.message}</p>`; }
+    try {
+      const issues = await fetchAll("/production/operator-accessory-issues/");
+      issuesBox.innerHTML = "";
+      dataTable(issuesBox, {
+        columns: [
+          { label: "Issue #", key: "issue_number" }, { label: "Operator", key: "operator_name" }, { label: "Accessory", key: "accessory_label" },
+          { label: "Order", value: i => i.order_number || "", render: i => i.order_number || "—" },
+          { label: "Issued", key: "issued_quantity", value: i => Number(i.issued_quantity) },
+          { label: "Used", key: "used_quantity", value: i => Number(i.used_quantity) },
+          { label: "Pieces", key: "pieces_covered", value: i => Number(i.pieces_covered) },
+          { label: "Remaining", value: i => Number(i.remaining_quantity), render: i => el("strong", { style: Number(i.remaining_quantity) > 0 ? "color:#00a844;" : "" }, String(i.remaining_quantity)) },
+          { label: "Actions", sortable: false, render: i => el("div", { class: "form-inline" }, [
+              el("button", { class: "secondary", type: "button", onclick: () => openUsage(i) }, "Record Usage"),
+              Number(i.remaining_quantity) > 0 ? el("button", { class: "secondary", type: "button", onclick: () => returnUnused(i) }, "Return Unused") : null]) },
+        ], rows: issues, pageSize: 8, initialSort: { key: "issue_number", dir: "desc" },
+        searchPlaceholder: "Search — operator, accessory, order…", emptyText: "No accessories issued to operators yet.",
+      });
+    } catch (e) { issuesBox.innerHTML = `<p class="error-msg">${e.message}</p>`; }
+  }
+
+  /* ============================ purchases panel ============================ */
+  function viewPO(po) {
+    const rows = po.items.map(i => el("tr", {}, [
+      el("td", {}, i.material_type === "FABRIC" ? `${i.fabric_type_name || "?"} / ${i.color_name || "?"}` : (i.accessory_label || "—")),
+      el("td", {}, badge(i.material_type)), el("td", {}, String(i.quantity)),
+      el("td", {}, i.material_type === "FABRIC" ? String(i.no_of_rolls || 1) : "—"),
+      el("td", {}, String(i.received_quantity)), el("td", {}, i.unit || "—"),
+    ]));
+    const table = el("table");
+    table.appendChild(el("thead", {}, el("tr", {}, ["Material", "Type", "Qty", "Rolls", "Received", "Unit"].map(h => el("th", {}, h)))));
+    table.appendChild(el("tbody", {}, rows));
+    showCrudModal(`🧾 ${po.po_number}`, [
+      detailGrid([["Type", PO_TYPE_LABEL[po.po_type] || po.po_type], ["Supplier", po.vendor_name || po.party_name || "—"],
+        ["For Order", po.order_number || "—"], ["Date", po.po_date], ["Receipt Status", badge(po.receipt_status)]]),
+      el("div", { class: "section-title" }, "Items"), table,
+    ], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+  }
+  function poItemsSummary(po) {
+    const fab = po.items.filter(i => i.material_type === "FABRIC").length;
+    const acc = po.items.filter(i => i.material_type === "ACCESSORY").length;
+    return [fab ? `${fab} fabric` : null, acc ? `${acc} accessory` : null].filter(Boolean).join(" · ") || "—";
+  }
+  async function refreshPurchases() {
+    const panel = document.getElementById("purchases-panel");
+    panel.innerHTML = "";
+    const box = el("div", { class: "muted" }, "Loading…");
+    panel.appendChild(el("div", { class: "card" }, [el("h3", {}, "🧾 Purchases (all sources)"),
+      el("p", { class: "card-subtitle" }, "Order-specific, bulk and customer-supplied purchases that stocked this store."), box]));
+    try {
+      PURCHASES = await fetchAll("/accounts/purchase-orders/");
+      box.innerHTML = "";
+      dataTable(box, {
+        columns: [
+          { label: "PO #", key: "po_number" },
+          { label: "Type", value: p => PO_TYPE_LABEL[p.po_type] || p.po_type, render: p => badge(PO_TYPE_LABEL[p.po_type] || p.po_type) },
+          { label: "Supplier", value: p => p.vendor_name || p.party_name || "", render: p => p.vendor_name || p.party_name || "—" },
+          { label: "For Order", value: p => p.order_number || "", render: p => p.order_number || "—" },
+          { label: "Materials", value: p => poItemsSummary(p), sortable: false },
+          { label: "Status", value: p => p.receipt_status, render: p => badge(p.receipt_status) },
+          { label: "Date", key: "po_date" },
+          { label: "", sortable: false, render: p => el("button", { class: "secondary", type: "button", onclick: () => viewPO(p) }, "View") },
+        ], rows: PURCHASES, pageSize: 12, initialSort: { key: "po_number", dir: "desc" },
+        searchPlaceholder: "Search purchases — PO #, supplier, order…", emptyText: "No purchases recorded yet.",
+      });
+    } catch (e) { box.innerHTML = `<p class="error-msg">${e.message}</p>`; }
+  }
+
+  /* ============================ tabs ============================ */
+  const loaded = {};
+  function show(tab) {
+    active = tab;
+    document.getElementById("fabric-panel").style.display = tab === "fabric" ? "" : "none";
+    document.getElementById("accessory-panel").style.display = tab === "accessory" ? "" : "none";
+    document.getElementById("purchases-panel").style.display = tab === "purchases" ? "" : "none";
+    renderTabs();
+    if (!loaded[tab]) {
+      loaded[tab] = true;
+      if (tab === "fabric") refreshFabric();
+      else if (tab === "accessory") refreshAccessory();
+      else refreshPurchases();
+    }
+  }
+  function renderTabs() {
+    const wrap = document.getElementById("tabs");
+    wrap.innerHTML = "";
+    wrap.appendChild(el("div", { class: "tabs" }, TABS.map(([key, label]) =>
+      el("button", { type: "button", class: active === key ? "active" : "", onclick: () => show(key) }, label))));
+  }
+
+  (async function init() {
+    await loadMaster();
+    // Purchases power the accessory→order suggestion, so load them up-front.
+    await refreshPurchases();
+    loaded.purchases = true;
+    show("fabric");
+  })();
+</script>
+{% endblock %}

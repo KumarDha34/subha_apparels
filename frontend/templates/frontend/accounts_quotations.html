@@ -1,0 +1,155 @@
+{% extends "frontend/base.html" %}
+{% block title %}Quotations - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Quotations</h2>
+  <p class="page-subtitle">Quote a customer a price before an order is confirmed. Send it, mark it accepted/rejected, then convert an accepted quote straight into an order. Quote numbers run Q-1001, Q-1002, …</p>
+
+  <div id="stats" class="grid grid-4" style="margin-bottom:1rem;"></div>
+  <div id="form-wrap"></div>
+  <div id="list-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ACCOUNTS", "MERCHANDISE"]);
+  renderShell("report-quotations", "Quotations");
+
+  const STATUS_TONE = { DRAFT: "", SENT: "info", ACCEPTED: "success", REJECTED: "danger", CONVERTED: "success", EXPIRED: "warning" };
+  let MASTER = { parties: [], products: [] };
+  let QUOTES = [];
+  let state = blank();
+
+  function blank() {
+    return { party: "", product: "", quantity: "", rate_per_piece: "", valid_till: "", terms: "" };
+  }
+
+  async function loadMaster() {
+    const [parties, products] = await Promise.all([
+      fetchAll("/master/parties/?is_active=true"),
+      fetchAll("/master/products/?is_active=true"),
+    ]);
+    MASTER = { parties, products };
+  }
+
+  /* ---------------- create form ---------------- */
+  function renderForm() {
+    const wrap = document.getElementById("form-wrap");
+    wrap.innerHTML = "";
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const amountLine = el("div", { class: "muted", style: "color:var(--brand);font-weight:600;margin-top:0.3rem;" });
+    function updAmount() {
+      const amt = (Number(state.quantity) || 0) * (Number(state.rate_per_piece) || 0);
+      amountLine.textContent = amt ? `Amount: ${fmtMoney(amt)}` : "";
+    }
+    const form = el("div", { class: "form-inline" }, [
+      field("Buyer *", selectEl({ onchange: e => state.party = e.target.value }, MASTER.parties.map(p => ({ value: p.id, label: p.name })), state.party, "Select buyer")),
+      field("Style / Product *", selectEl({ onchange: e => state.product = e.target.value }, MASTER.products.map(p => ({ value: p.id, label: `${p.code} — ${p.name}` })), state.product, "Select style")),
+      field("Quantity *", numberInput(state.quantity, v => { state.quantity = v; updAmount(); }, { min: "1", step: "1" })),
+      field("Rate / Pc *", numberInput(state.rate_per_piece, v => { state.rate_per_piece = v; updAmount(); }, { min: "0", step: "0.01" })),
+      field("Valid Till *", el("input", { type: "date", value: state.valid_till, oninput: e => state.valid_till = e.target.value })),
+    ]);
+    const terms = field("Terms (payment & delivery)", el("textarea", { rows: "2", oninput: e => state.terms = e.target.value }, state.terms || ""));
+    const submit = el("button", { type: "button", onclick: create }, "Create Quotation");
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "➕ New Quotation"), err, form, amountLine, terms,
+      el("div", { class: "form-inline", style: "margin-top:0.7rem;" }, [submit]),
+    ]));
+    wrap._err = err;
+    updAmount();
+  }
+
+  async function create() {
+    const err = document.getElementById("form-wrap")._err; err.style.display = "none";
+    if (!state.party || !state.product || !state.quantity || Number(state.quantity) <= 0 || state.rate_per_piece === "" || !state.valid_till) {
+      err.textContent = "Buyer, style, quantity, rate and valid-till are all required."; err.style.display = "block"; return;
+    }
+    try {
+      await apiPost("/accounts/quotations/", {
+        party: Number(state.party), product: Number(state.product),
+        quantity: Number(state.quantity), rate_per_piece: Number(state.rate_per_piece),
+        valid_till: state.valid_till, terms: state.terms || "",
+      });
+      notify.success("Quotation created."); state = blank(); renderForm(); await load();
+    } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+  }
+
+  /* ---------------- actions ---------------- */
+  async function act(q, action, ok) {
+    try { await apiPost(`/accounts/quotations/${q.id}/${action}/`, {}); notify.success(ok); await load(); }
+    catch (e) { notify.error(e.message); }
+  }
+  function printPDF(q) {
+    const win = window.open("", "_blank", "width=800,height=900");
+    win.document.write(`<!DOCTYPE html><html><head><title>${q.quote_number}</title><style>
+      body{font-family:Arial,sans-serif;padding:2.5rem;color:#111;} h1{font-size:1.5rem;margin:0;}
+      .sub{color:#555;margin:.2rem 0 1.5rem;} table{width:100%;border-collapse:collapse;margin-top:1rem;}
+      th,td{border:1px solid #999;padding:.55rem .8rem;text-align:left;} th{background:#f0f0f0;}
+      .meta{display:grid;grid-template-columns:1fr 1fr;gap:.4rem 2rem;margin-top:1rem;} .meta span{color:#555;}
+      .terms{margin-top:1.5rem;} .sign{margin-top:3rem;display:grid;grid-template-columns:1fr 1fr;gap:2rem;}
+      .sign div{border-top:1px solid #333;padding-top:.3rem;margin-top:2.5rem;}</style></head><body>
+      <h1>QUOTATION</h1><div class="sub">${q.quote_number}</div>
+      <div class="meta">
+        <div><span>Date:</span> ${(q.created_at || "").slice(0,10)}</div>
+        <div><span>Valid Till:</span> ${q.valid_till}</div>
+        <div><span>Buyer:</span> ${q.party_name}</div>
+        <div><span>Status:</span> ${q.status}</div>
+      </div>
+      <table><thead><tr><th>Style</th><th>Quantity</th><th>Rate / Pc</th><th>Amount</th></tr></thead>
+        <tbody><tr><td>${q.product_code} — ${q.product_name}</td><td>${q.quantity}</td><td>${q.rate_per_piece}</td><td>${q.amount}</td></tr></tbody>
+        <tfoot><tr><th colspan="3" style="text-align:right;">Total</th><th>${q.amount}</th></tr></tfoot></table>
+      <div class="terms"><strong>Terms:</strong><br>${(q.terms || "—").replace(/\\n/g,"<br>")}</div>
+      <div class="sign"><div>For the Company</div><div>Customer Acceptance</div></div>
+      <script>window.onload=()=>window.print();<\/script></body></html>`);
+    win.document.close();
+  }
+
+  function actionsFor(q) {
+    const acts = [];
+    if (q.status === "DRAFT") acts.push(el("button", { type: "button", onclick: () => act(q, "send", "Marked as sent.") }, "Send"));
+    if (q.status === "SENT") {
+      acts.push(el("button", { class: "success", type: "button", onclick: () => act(q, "accept", "Accepted.") }, "Accept"));
+      acts.push(el("button", { class: "danger", type: "button", onclick: () => act(q, "reject", "Rejected.") }, "Reject"));
+    }
+    acts.push(el("button", { class: "secondary", type: "button", onclick: () => printPDF(q) }, "PDF"));
+    return el("div", { class: "form-inline" }, acts);
+  }
+
+  /* ---------------- list ---------------- */
+  function renderStats() {
+    const s = document.getElementById("stats"); s.innerHTML = "";
+    const by = st => QUOTES.filter(q => q.status === st).length;
+    [["Total", QUOTES.length], ["Sent", by("SENT")], ["Accepted", by("ACCEPTED")], ["Converted", by("CONVERTED")]].forEach(([label, val]) =>
+      s.appendChild(el("div", { class: "card stat" }, [el("div", { class: "value" }, String(val)), el("div", { class: "label" }, label)])));
+  }
+
+  async function load() {
+    try { QUOTES = await fetchAll("/accounts/quotations/"); }
+    catch (e) { document.getElementById("list-wrap").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    renderStats();
+    const wrap = document.getElementById("list-wrap"); wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "All Quotations"), body]));
+    dataTable(body, {
+      columns: [
+        { label: "Quote No.", key: "quote_number" },
+        { label: "Date", value: q => q.created_at || "", render: q => (q.created_at || "").slice(0, 10) },
+        { label: "Buyer", key: "party_name" },
+        { label: "Style", value: q => `${q.product_code} ${q.product_name}`, render: q => `${q.product_code} — ${q.product_name}` },
+        { label: "Qty", key: "quantity", value: q => Number(q.quantity) },
+        { label: "Rate", key: "rate_per_piece", value: q => Number(q.rate_per_piece), render: q => fmtMoney(q.rate_per_piece) },
+        { label: "Amount", value: q => Number(q.amount), render: q => fmtMoney(q.amount) },
+        { label: "Valid Till", key: "valid_till", render: q => (q.is_expired ? el("span", { style: "color:var(--danger);" }, q.valid_till) : q.valid_till) },
+        { label: "Status", value: q => q.status, render: q => badge(q.status) },
+        { label: "Action", sortable: false, render: q => actionsFor(q) },
+      ], rows: QUOTES, pageSize: 12, initialSort: { key: "quote_number", dir: "desc" },
+      searchPlaceholder: "Search — quote #, buyer, style, status…", emptyText: "No quotations yet — create one above.",
+    });
+  }
+
+  (async function init() {
+    await loadMaster();
+    renderForm();
+    await load();
+  })();
+</script>
+{% endblock %}

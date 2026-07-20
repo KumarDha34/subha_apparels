@@ -1,0 +1,110 @@
+{% extends "frontend/base.html" %}
+{% load static %}
+{% block title %}Customer-Supplied Purchase - GMS{% endblock %}
+{% block content %}
+  <div class="page-header-row">
+    <div>
+      <h2 class="page-title">Customer Supplied</h2>
+      <p class="page-subtitle">Record fabric or accessories a customer has sent in — added straight to stock. If fabric arrives as several rolls of the same colour (e.g. 5 rolls of White, 110 m each = 550 m total), set the total quantity and <strong>No. of rolls</strong> and it's split into that many separate stock rolls.</p>
+    </div>
+    <a class="btn secondary" href="/store/purchases/">View Purchase Orders →</a>
+  </div>
+
+  <div id="success-banner"></div>
+  <div id="po-form"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/purchase-builder.js' %}?v=20260748"></script>
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-purchase-customer-supplied", "Customer Supplied");
+
+  let nextClientId = 1;
+  let MASTER = { parties: [], orders: [], fabricTypes: [], colors: [], accessories: [] };
+  let poState = blankPO();
+  let poErrors = [];
+
+  function blankPO() {
+    return { party: "", related_order: "", po_date: new Date().toISOString().slice(0, 10), remarks: "", items: [blankPurchaseItem(nextClientId++)] };
+  }
+
+  async function loadMasterData() {
+    const [parties, orders, fabricTypes, colors, accessories] = await Promise.all([
+      fetchAll("/master/parties/?is_active=true"),
+      fetchAll("/orders/"),
+      fetchAll("/master/fabric-types/?is_active=true"),
+      fetchAll("/master/colors/?is_active=true"),
+      fetchAll("/master/accessories/?is_active=true"),
+    ]);
+    MASTER = { parties, orders, fabricTypes, colors, accessories };
+  }
+
+  function render() {
+    const root = document.getElementById("po-form");
+    root.innerHTML = "";
+
+    const header = el("div", { class: "form-inline" }, [
+      field("Party (Customer)", selectWithAdd(
+        selectEl({ onchange: e => { poState.party = e.target.value; } },
+          MASTER.parties.map(p => ({ value: p.id, label: p.name })), poState.party, "Select party"),
+        "Add Party",
+        () => openQuickAddModal(PURCHASE_QUICK_ADD.party, created => { MASTER.parties.push(created); poState.party = created.id; render(); }))),
+      field("Related Order (optional)", selectEl({ onchange: e => { poState.related_order = e.target.value; } },
+        MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), poState.related_order, "None yet")),
+      field("Date", el("input", { type: "date", value: poState.po_date, oninput: e => poState.po_date = e.target.value })),
+    ]);
+    const banner = el("div", { class: "mode-banner mode-ratio" },
+      "🎁 Customer-supplied materials go straight to stock — no payment or rate is recorded, and this doesn't need to be linked to an order yet.");
+    const remarks = field("Remarks", el("textarea", { oninput: e => poState.remarks = e.target.value }, poState.remarks || ""));
+
+    const itemBlocks = poState.items.map((item, idx) => renderPurchaseItemRow(item, idx, MASTER, {
+      onRerender: render,
+      onRemove: () => { poState.items.splice(idx, 1); render(); },
+      removeDisabled: poState.items.length <= 1,
+      showRolls: true,
+    }));
+    const addBtn = el("button", { class: "secondary", type: "button", onclick: () => { poState.items.push(blankPurchaseItem(nextClientId++)); render(); } }, "+ Add Item");
+    const saveBtn = el("button", { type: "button", onclick: save }, "Add to Stock");
+
+    root.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "🎁 New Customer-Supplied Purchase"),
+      poErrors.length ? el("div", { class: "error-msg" }, poErrors.join(" ")) : null,
+      header, banner, remarks,
+      el("div", { class: "section-title" }, "Items"),
+      ...itemBlocks, addBtn,
+      el("div", { class: "form-inline", style: "margin-top:1rem;" }, [saveBtn]),
+    ]));
+  }
+
+  async function save() {
+    const errs = [];
+    if (!poState.party) errs.push("Select the party (customer).");
+    if (!poState.po_date) errs.push("Set a date.");
+    errs.push(...validatePurchaseItems(poState.items));
+    poErrors = [...new Set(errs)];
+    if (poErrors.length) { render(); return; }
+
+    const payload = {
+      party: Number(poState.party), po_type: "CUSTOMER_SUPPLIED",
+      related_order: poState.related_order ? Number(poState.related_order) : null,
+      po_date: poState.po_date, remarks: poState.remarks || "", items: buildPurchaseItemsPayload(poState.items),
+    };
+    try {
+      const created = await apiPost("/accounts/purchase-orders/", payload);
+      poState = blankPO();
+      poErrors = [];
+      render();
+      document.getElementById("success-banner").innerHTML = "";
+      document.getElementById("success-banner").appendChild(
+        el("div", { class: "card", style: "border-left:3px solid var(--accent);" },
+          `✅ Added directly to stock — PO ${created.po_number} is now Received.`));
+    } catch (e) { alert("Error: " + e.message); }
+  }
+
+  (async function init() {
+    await loadMasterData();
+    render();
+  })();
+</script>
+{% endblock %}

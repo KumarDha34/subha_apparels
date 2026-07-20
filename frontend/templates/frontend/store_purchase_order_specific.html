@@ -1,0 +1,108 @@
+{% extends "frontend/base.html" %}
+{% load static %}
+{% block title %}Order-Specific Purchase - GMS{% endblock %}
+{% block content %}
+  <div class="page-header-row">
+    <div>
+      <h2 class="page-title">Order-Specific Purchase</h2>
+      <p class="page-subtitle">Buy fabric or accessories needed for a specific order. Price is captured later, when materials are received.</p>
+    </div>
+    <a class="btn secondary" href="/store/purchases/">View Purchase Orders →</a>
+  </div>
+
+  <div id="success-banner"></div>
+  <div id="po-form"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'js/purchase-builder.js' %}?v=20260748"></script>
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-purchase-order-specific", "Order-Specific Purchase");
+
+  let nextClientId = 1;
+  let MASTER = { orders: [], vendors: [], fabricTypes: [], colors: [], accessories: [] };
+  let poState = blankPO();
+  let poErrors = [];
+
+  function blankPO() {
+    return { related_order: "", vendor: "", po_date: new Date().toISOString().slice(0, 10), remarks: "", items: [blankPurchaseItem(nextClientId++)] };
+  }
+
+  async function loadMasterData() {
+    const [orders, vendors, fabricTypes, colors, accessories] = await Promise.all([
+      fetchAll("/orders/"),
+      fetchAll("/master/vendors/?is_active=true"),
+      fetchAll("/master/fabric-types/?is_active=true"),
+      fetchAll("/master/colors/?is_active=true"),
+      fetchAll("/master/accessories/?is_active=true"),
+    ]);
+    MASTER = { orders: orders.filter(o => !["DRAFT", "CANCELLED"].includes(o.status)), vendors, fabricTypes, colors, accessories };
+  }
+
+  function render() {
+    const root = document.getElementById("po-form");
+    root.innerHTML = "";
+
+    const header = el("div", { class: "form-inline" }, [
+      field("Related Order", selectEl({ onchange: e => { poState.related_order = e.target.value; } },
+        MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), poState.related_order, "Select order")),
+      field("Vendor", selectWithAdd(
+        selectEl({ onchange: e => { poState.vendor = e.target.value; } },
+          MASTER.vendors.map(v => ({ value: v.id, label: v.company_name })), poState.vendor, "Select vendor"),
+        "Add Vendor",
+        () => openQuickAddModal(PURCHASE_QUICK_ADD.vendor, created => { MASTER.vendors.push(created); poState.vendor = created.id; render(); }))),
+      field("PO Date", el("input", { type: "date", value: poState.po_date, oninput: e => poState.po_date = e.target.value })),
+    ]);
+    const remarks = field("Remarks", el("textarea", { oninput: e => poState.remarks = e.target.value }, poState.remarks || ""));
+
+    const itemBlocks = poState.items.map((item, idx) => renderPurchaseItemRow(item, idx, MASTER, {
+      onRerender: render,
+      onRemove: () => { poState.items.splice(idx, 1); render(); },
+      removeDisabled: poState.items.length <= 1,
+      showRolls: true,
+    }));
+    const addBtn = el("button", { class: "secondary", type: "button", onclick: () => { poState.items.push(blankPurchaseItem(nextClientId++)); render(); } }, "+ Add Item");
+    const saveBtn = el("button", { type: "button", onclick: save }, "Create Purchase Order");
+
+    root.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "🎯 New Order-Specific Purchase"),
+      poErrors.length ? el("div", { class: "error-msg" }, poErrors.join(" ")) : null,
+      header, remarks,
+      el("div", { class: "section-title" }, "Items"),
+      ...itemBlocks, addBtn,
+      el("div", { class: "form-inline", style: "margin-top:1rem;" }, [saveBtn]),
+    ]));
+  }
+
+  async function save() {
+    const errs = [];
+    if (!poState.related_order) errs.push("Select the related order.");
+    if (!poState.vendor) errs.push("Select a vendor.");
+    if (!poState.po_date) errs.push("Set a PO date.");
+    errs.push(...validatePurchaseItems(poState.items));
+    poErrors = [...new Set(errs)];
+    if (poErrors.length) { render(); return; }
+
+    const payload = {
+      related_order: Number(poState.related_order), vendor: Number(poState.vendor), po_type: "ORDER_SPECIFIC",
+      po_date: poState.po_date, remarks: poState.remarks || "", items: buildPurchaseItemsPayload(poState.items),
+    };
+    try {
+      const created = await apiPost("/accounts/purchase-orders/", payload);
+      poState = blankPO();
+      poErrors = [];
+      render();
+      document.getElementById("success-banner").innerHTML = "";
+      document.getElementById("success-banner").appendChild(
+        el("div", { class: "card", style: "border-left:3px solid var(--accent);" },
+          `✅ Purchase order ${created.po_number} created (status: Pending). Receive it from the Purchase Orders page once materials arrive.`));
+    } catch (e) { alert("Error: " + e.message); }
+  }
+
+  (async function init() {
+    await loadMasterData();
+    render();
+  })();
+</script>
+{% endblock %}

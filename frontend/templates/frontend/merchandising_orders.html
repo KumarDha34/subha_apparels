@@ -1,0 +1,553 @@
+{% extends "frontend/base.html" %}
+{% block title %}Orders - GMS{% endblock %}
+{% block content %}
+  <div class="page-header-row">
+    <div>
+      <h2 class="page-title">Orders</h2>
+      <p class="page-subtitle">Create and manage orders from fabric receipt through dispatch.</p>
+    </div>
+    <button id="new-order-btn" type="button">+ New Order</button>
+  </div>
+
+  <div id="order-builder"></div>
+  <div id="orders-table-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["MERCHANDISE"]);
+  renderShell("merch-orders", "Orders");
+
+  /* ---------------------------------------------------------------------
+     Master data: fetched once, cached, reused for every dynamically-added
+     row's <select> so adding rows never costs a network round-trip.
+     fetchAll() (shared, api.js) walks pagination instead of trusting page 1
+     (crud.js's loadOptions() truncates at PAGE_SIZE=20 -- this screen must not).
+  --------------------------------------------------------------------- */
+  let MASTER = { parties: [], products: [], fabricTypes: [], colors: [], sizes: [], rolls: [], orders: [] };
+  async function loadMasterData() {
+    const [parties, products, fabricTypes, colors, sizes, rolls, orders] = await Promise.all([
+      fetchAll("/master/parties/?is_active=true"),
+      fetchAll("/master/products/?is_active=true"),
+      fetchAll("/master/fabric-types/?is_active=true"),
+      fetchAll("/master/colors/?is_active=true"),
+      fetchAll("/master/sizes/?is_active=true"),
+      fetchAll("/store/fabric-stock/?is_active=true"),
+      fetchAll("/orders/"),
+    ]);
+    MASTER = { parties, products, fabricTypes, colors, sizes, rolls, orders };
+  }
+
+  /** Customer-supplied roll ids already committed to another active
+   *  (non-cancelled) order. A customer-supplied roll is one physical package
+   *  and belongs to a single order, so it's excluded from the picker. General
+   *  vendor stock is a shared running-balance row and stays reusable. The
+   *  order being edited is not counted against itself. */
+  function usedRollIds() {
+    const supplied = new Set((MASTER.rolls || []).filter(r => r.supplied_by_party).map(r => Number(r.id)));
+    const used = new Set();
+    (MASTER.orders || []).forEach(o => {
+      if (o.status === "CANCELLED") return;
+      if (editingOrderId && o.id === editingOrderId) return;
+      (o.items || []).forEach(it => (it.colors || []).forEach(c => (c.rolls || []).forEach(r => {
+        if (supplied.has(Number(r))) used.add(Number(r));
+      })));
+    });
+    return used;
+  }
+
+  /* ---------------------------------------------------------------------
+     Order Builder state tree -- mirrors the backend's Order/OrderItem/
+     OrderItemColor/OrderItemColorSize shape. Order type is a fixed
+     2-choice field; everything else (items, colors, size/ratio rows) is
+     freely add/removable. The builder itself is hidden until "+ New
+     Order" / "Edit" is clicked, so the page opens on the order list.
+  --------------------------------------------------------------------- */
+  let nextClientId = 1;
+  let editingOrderId = null;
+  let editingOrderNumber = "";
+  let orderState = blankOrder();
+  let builderVisible = false;
+
+  function blankOrder() {
+    return { party: "", order_date: "", order_type: "FIXED_QUANTITY", is_repeat: false, remarks: "", cutting_instruction: "", items: [blankItem()] };
+  }
+  function blankItem() {
+    return { cid: nextClientId++, product: "", fabric_type: "", approved_average: "", price_per_piece: "", inner_required: false, fusing_required: false, resting_needed: false, colors: [blankColor()] };
+  }
+  function blankColor() {
+    return { cid: nextClientId++, color: "", rolls: [], half_roll: false, size_lines: [blankSizeLine()] };
+  }
+  function blankSizeLine() {
+    return { cid: nextClientId++, size: "", quantity: "", ratio_part: "" };
+  }
+
+  /* selectEl/multiSelectEl/numberInput/field/removeIconBtn/colorDot now
+     live in api.js -- shared with Store's purchase builder pages. */
+  function yesNoCheckbox(checked, onChange) {
+    return el("label", {}, [
+      el("input", { type: "checkbox", ...(checked ? { checked: "checked" } : {}), onchange: e => { onChange(e.target.checked); renderOrderBuilder(); } }),
+      checked ? " Yes" : " No",
+    ]);
+  }
+
+  /* ---------------------------------------------------------------------
+     Quick-add: lets merchandise create a missing Party/Product/Color/
+     Fabric Type/Size without leaving the order builder. Writes go through
+     the same master-data endpoints the dedicated Parties/Products/Colors/
+     Fabric Types pages use -- MERCHANDISE already has write access.
+  --------------------------------------------------------------------- */
+  const QUICK_ADD = {
+    party: { title: "New Party / Customer", endpoint: "/master/parties/", fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "contact_person", label: "Contact Person" },
+      { name: "phone", label: "Phone" },
+      { name: "email", label: "Email" },
+    ]},
+    product: { title: "New Product", endpoint: "/master/products/", fields: [
+      { name: "name", label: "Name", required: true },
+    ], hint: "Product code is generated automatically (e.g. TE-ASH-001)." },
+    fabricType: { title: "New Fabric Type", endpoint: "/master/fabric-types/", fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "gsm", label: "GSM", type: "number", step: "0.01" },
+      { name: "composition", label: "Composition (e.g. 100% Cotton)" },
+    ]},
+    color: { title: "New Color", endpoint: "/master/colors/", fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "hex_code", label: "Hex Code (optional)" },
+    ], hint: "Leave hex code blank to auto-generate one from the name." },
+    size: { title: "New Size", endpoint: "/master/sizes/", fields: [
+      { name: "name", label: "Size Name (e.g. XL)", required: true },
+    ], hint: "Standard sizes (XS–6XL) are sorted into real-world order automatically." },
+  };
+
+  /* openQuickAdd/selectWithAddKind are thin wrappers over the shared
+     openQuickAddModal/selectWithAdd (crud.js), kept kind-keyed to match
+     this page's QUICK_ADD config; colorDot/removeIconBtn now live in api.js. */
+  function openQuickAdd(kind, onCreated) {
+    openQuickAddModal(QUICK_ADD[kind], onCreated);
+  }
+  function selectWithAddKind(kind, selectNode, onCreated, leading) {
+    return selectWithAdd(selectNode, `Add ${QUICK_ADD[kind].title.replace("New ", "")}`, () => openQuickAdd(kind, onCreated), leading);
+  }
+  function ratioSummary(color) {
+    const parts = color.size_lines
+      .filter(l => l.size && l.ratio_part)
+      .map(l => `${MASTER.sizes.find(s => String(s.id) === String(l.size))?.name || "?"}:${l.ratio_part}`);
+    if (!parts.length) return "Enter a ratio for each size (e.g. S:1, M:2, L:2).";
+    const total = color.size_lines.reduce((s, l) => s + (Number(l.ratio_part) || 0), 0);
+    return `Ratio — ${parts.join(" : ")} (${total} parts total)`;
+  }
+
+  /* ---------------------------------------------------------------------
+     Rendering -- full-tree re-render on structural change (add/remove
+     row, order type toggle). Free-text/number inputs mutate state via
+     oninput WITHOUT re-rendering, so focus/cursor position is preserved
+     while typing. The builder only renders when `builderVisible` is true
+     -- the page opens on the order list, not a wall of form fields.
+  --------------------------------------------------------------------- */
+  function renderOrderBuilder() {
+    const root = document.getElementById("order-builder");
+    root.innerHTML = "";
+    if (!builderVisible) return;
+
+    const errors = validateOrderState(orderState, { silent: true });
+
+    const isFixed = orderState.order_type === "FIXED_QUANTITY";
+
+    const closeBtn = removeIconBtn("Close", false, () => {
+      builderVisible = false; editingOrderId = null; editingOrderNumber = ""; orderState = blankOrder();
+      renderOrderBuilder();
+    });
+
+    const header = el("div", { class: "form-inline" }, [
+      field("Party", selectWithAddKind("party",
+        selectEl({ onchange: e => { orderState.party = e.target.value; renderOrderBuilder(); } },
+          MASTER.parties.map(p => ({ value: p.id, label: p.name })), orderState.party, "Select party"),
+        created => { MASTER.parties.push(created); orderState.party = created.id; renderOrderBuilder(); })),
+      field("Order Date", el("input", { type: "date", value: orderState.order_date, oninput: e => orderState.order_date = e.target.value })),
+      field("Order Type", selectEl({ onchange: e => { orderState.order_type = e.target.value; renderOrderBuilder(); } }, [
+        { value: "FIXED_QUANTITY", label: "Fixed Quantity" },
+        { value: "RATIO_BASED", label: "Ratio Based" },
+      ], orderState.order_type)),
+      field("New Repeat", el("label", {}, [
+        el("input", { type: "checkbox", ...(orderState.is_repeat ? { checked: "checked" } : {}), onchange: e => orderState.is_repeat = e.target.checked }),
+        " Repeat order",
+      ])),
+    ]);
+
+    const modeBanner = el("div", { class: `mode-banner ${isFixed ? "mode-fixed" : "mode-ratio"}` },
+      isFixed
+        ? "📦 Fixed Quantity — enter the exact piece count for every size below. Rolls are optional at order time."
+        : "✂️ Ratio Based — enter the cutting ratio for every size (e.g. 1:2:2:3). Final piece counts are known only after cutting, so at least one roll is required per color.");
+
+    const remarks = field("Remarks", el("textarea", { oninput: e => orderState.remarks = e.target.value }, orderState.remarks || ""));
+    const cuttingInstruction = field("Cutting Instruction (for the Cutting floor)",
+      el("textarea", { rows: "2", placeholder: "e.g. Use only half of each roll for every colour, return the rest", oninput: e => orderState.cutting_instruction = e.target.value }, orderState.cutting_instruction || ""));
+
+    const itemBlocks = orderState.items.map((item, idx) => renderItemBlock(item, idx, isFixed));
+
+    const addItemBtn = el("button", { class: "secondary", type: "button", onclick: () => { orderState.items.push(blankItem()); renderOrderBuilder(); } }, "+ Add Product Item");
+
+    const totalQty = isFixed
+      ? orderState.items.reduce((s, it) => s + it.colors.reduce((s2, c) => s2 + c.size_lines.reduce((s3, l) => s3 + (Number(l.quantity) || 0), 0), 0), 0)
+      : null;
+    const summary = el("div", { class: "muted", style: "margin:0.9rem 0;" },
+      isFixed ? `Total quantity: ${totalQty} pcs` : "Ratio-based order — total pieces are known only after cutting.");
+
+    const saveBtn = el("button", { type: "button", onclick: saveOrder }, editingOrderId ? "Save Changes" : "Create Order");
+    const cancelBtn = el("button", { class: "secondary", type: "button", onclick: () => { builderVisible = false; editingOrderId = null; editingOrderNumber = ""; orderState = blankOrder(); renderOrderBuilder(); } }, "Cancel");
+
+    root.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "subcard-header" }, [
+        el("h3", { style: "margin:0;" }, editingOrderId ? `✏️ Editing Order ${editingOrderNumber}` : "📝 New Order"),
+        closeBtn,
+      ]),
+      errors.length ? el("div", { class: "error-msg" }, errors.join(" ")) : null,
+      header, modeBanner, remarks, cuttingInstruction,
+      el("div", { class: "section-title" }, "Product Items"),
+      ...itemBlocks, addItemBtn,
+      summary,
+      el("div", { class: "form-inline" }, [saveBtn, cancelBtn]),
+    ]));
+  }
+
+  function renderItemBlock(item, idx, isFixed) {
+    const removeBtn = removeIconBtn("Remove item", orderState.items.length <= 1, () => { orderState.items.splice(idx, 1); renderOrderBuilder(); });
+
+    const fields = el("div", { class: "form-inline" }, [
+      field("Product", selectWithAddKind("product",
+        selectEl({ onchange: e => { item.product = e.target.value; renderOrderBuilder(); } },
+          MASTER.products.map(p => ({ value: p.id, label: `${p.code} — ${p.name}` })), item.product, "Select product"),
+        created => { MASTER.products.push(created); item.product = created.id; renderOrderBuilder(); })),
+      field("Fabric Type", selectWithAddKind("fabricType",
+        selectEl({ onchange: e => { item.fabric_type = e.target.value; renderOrderBuilder(); } },
+          MASTER.fabricTypes.map(f => ({ value: f.id, label: f.gsm ? `${f.name} · ${f.gsm} GSM` : f.name })), item.fabric_type, "Select fabric type"),
+        created => { MASTER.fabricTypes.push(created); item.fabric_type = created.id; renderOrderBuilder(); })),
+      field("Approved Average (per pc)", numberInput(item.approved_average, v => item.approved_average = v, { step: "0.001", required: "required" })),
+      field("Operator Rate / Piece (Rs.)", numberInput(item.price_per_piece, v => item.price_per_piece = v, { step: "0.01", min: "0", required: "required" })),
+      field("Inner Required", yesNoCheckbox(item.inner_required, v => item.inner_required = v)),
+      field("Fusing Required", yesNoCheckbox(item.fusing_required, v => item.fusing_required = v)),
+      field("Resting Needed", yesNoCheckbox(item.resting_needed, v => item.resting_needed = v)),
+    ]);
+
+    const colorBlocks = item.colors.map((color, cidx) => renderColorBlock(item, color, cidx, isFixed));
+    const addColorBtn = el("button", { class: "secondary", type: "button", onclick: () => { item.colors.push(blankColor()); renderOrderBuilder(); } }, "+ Add Color");
+
+    return el("div", { class: "subcard level-item" }, [
+      el("div", { class: "subcard-header" }, [
+        el("span", { class: "subcard-title" }, `Item ${idx + 1}`), removeBtn,
+      ]),
+      fields, ...colorBlocks, addColorBtn,
+    ]);
+  }
+
+  /** "Selected: 5 rolls (110 m)" line under the roll picker, with the fabric
+   *  total the customer's chosen rolls add up to. */
+  function rollSelectionSummary(color) {
+    const ids = (color.rolls || []).map(Number);
+    if (!ids.length) return null;
+    const chosen = MASTER.rolls.filter(r => ids.includes(Number(r.id)));
+    const total = chosen.reduce((s, r) => s + Number(r.available_quantity || 0), 0);
+    const unit = chosen[0]?.unit || "m";
+    return el("div", { class: "muted", style: "margin-top:0.3rem;color:var(--brand);font-weight:600;" },
+      `Selected: ${ids.length} roll(s) · ${total.toFixed(2)} ${unit} total`);
+  }
+
+  function renderColorBlock(item, color, cidx, isFixed) {
+    const removeBtn = removeIconBtn("Remove color", item.colors.length <= 1, () => { item.colors.splice(cidx, 1); renderOrderBuilder(); });
+
+    const rollLabel = r => `${r.fabric_type_name} / ${r.color_name} — ${r.roll_number || "Roll #" + r.id} (${r.available_quantity} ${r.unit})` +
+      (r.supplied_by_party_name ? ` · Customer Supplied: ${r.supplied_by_party_name}` : (r.vendor_name ? ` · Vendor: ${r.vendor_name}` : ""));
+
+    // Customer-supplied rolls are earmarked for that customer's own order --
+    // never show one customer's supplied material as a pick for a different
+    // party's order. General (vendor-sourced / unassigned) stock stays
+    // available to everyone. Rolls already committed to another active order
+    // are hidden too (a roll belongs to one order at a time) -- but a roll
+    // this color already has selected stays visible so editing works.
+    const used = usedRollIds();
+    const selected = new Set((color.rolls || []).map(Number));
+    const partyRolls = MASTER.rolls.filter(r =>
+      (!r.supplied_by_party || (orderState.party && Number(r.supplied_by_party) === Number(orderState.party))) &&
+      (!used.has(Number(r.id)) || selected.has(Number(r.id))));
+    const exactRolls = partyRolls.filter(r =>
+      (!item.fabric_type || Number(r.fabric_type) === Number(item.fabric_type)) && (!color.color || Number(r.color) === Number(color.color)));
+
+    let rollOptions, rollsHint;
+    if (MASTER.rolls.length === 0) {
+      rollOptions = [];
+      rollsHint = el("div", { class: "muted", style: "color:var(--danger);margin-top:0.3rem;" },
+        "No fabric stock has been received yet — ask Store to receive fabric (Store → Fabric Stock) before this list has any rolls to pick from.");
+    } else if (partyRolls.length === 0) {
+      rollOptions = [];
+      rollsHint = el("div", { class: "muted", style: "color:var(--danger);margin-top:0.3rem;" },
+        "No fabric stock is available for this party — other rolls in stock are customer-supplied material belonging to a different party.");
+    } else if (exactRolls.length > 0) {
+      rollOptions = exactRolls.map(r => ({ value: r.id, label: rollLabel(r) }));
+      rollsHint = null;
+    } else {
+      // No stock matches this exact fabric type + color -- fall back to
+      // every roll available to this party rather than leaving the field
+      // with nothing to pick, but flag that it's not an exact match.
+      rollOptions = partyRolls.map(r => ({ value: r.id, label: rollLabel(r) }));
+      rollsHint = el("div", { class: "muted", style: "margin-top:0.3rem;" },
+        "No fabric stock exactly matches this fabric type & color — showing all rolls available to this party, double-check before selecting.");
+    }
+    const selectedColor = MASTER.colors.find(c => String(c.id) === String(color.color));
+
+    const fields = el("div", { class: "form-inline" }, [
+      field("Color", selectWithAddKind("color",
+        selectEl({ onchange: e => { color.color = e.target.value; renderOrderBuilder(); } },
+          MASTER.colors.map(c => ({ value: c.id, label: c.hex_code ? `${c.name} (${c.hex_code})` : c.name })), color.color, "Select color"),
+        created => { MASTER.colors.push(created); color.color = created.id; renderOrderBuilder(); },
+        colorDot(selectedColor?.hex_code))),
+      field(isFixed ? "Rolls to be Used (optional)" : el("span", {}, ["Rolls to be Used ", el("span", { style: "color:var(--danger);font-weight:700;" }, "(required)")]),
+        el("div", {}, [
+          multiSelectEl({ onchange: e => { color.rolls = [...e.target.selectedOptions].map(o => o.value); renderOrderBuilder(); } }, rollOptions, color.rolls),
+          rollsHint, rollSelectionSummary(color),
+        ])),
+      field("Use Half Roll", el("div", {}, [
+        yesNoCheckbox(color.half_roll, v => { color.half_roll = v; }),
+        el("div", { class: "muted", style: "font-size:0.8rem;" }, "Cut ~half of each roll for this colour; return the rest."),
+      ])),
+    ]);
+
+    const rows = color.size_lines.map((line, lidx) => renderSizeRow(color, line, lidx, isFixed));
+    const table = el("table", {}, [
+      el("thead", {}, el("tr", {}, ["Size", isFixed ? "Quantity" : "Ratio Part", ""].map(h => el("th", {}, h)))),
+      el("tbody", {}, rows),
+    ]);
+    const addRowBtn = el("button", { class: "secondary", type: "button", onclick: () => { color.size_lines.push(blankSizeLine()); renderOrderBuilder(); } }, "+ Add Size Row");
+    const subtotal = isFixed
+      ? el("div", { class: "muted", style: "margin-top:0.4rem;" }, `Subtotal: ${color.size_lines.reduce((s, l) => s + (Number(l.quantity) || 0), 0)} pcs`)
+      : el("div", { class: "muted", style: "margin-top:0.4rem;" }, ratioSummary(color));
+
+    return el("div", { class: "subcard level-color" }, [
+      el("div", { class: "subcard-header" }, [
+        el("span", { class: "subcard-title" }, `Color ${cidx + 1}`), removeBtn,
+      ]),
+      fields, table, addRowBtn, subtotal,
+    ]);
+  }
+
+  function renderSizeRow(color, line, lidx, isFixed) {
+    const sizeSelect = selectWithAddKind("size",
+      selectEl({ onchange: e => { line.size = e.target.value; renderOrderBuilder(); } },
+        MASTER.sizes.map(s => ({ value: s.id, label: s.name })), line.size, "Size"),
+      created => { MASTER.sizes.push(created); line.size = created.id; renderOrderBuilder(); });
+    const valueInput = isFixed
+      ? numberInput(line.quantity, v => line.quantity = v, { min: "1" })
+      : numberInput(line.ratio_part, v => line.ratio_part = v, { min: "1" });
+    const removeBtn = removeIconBtn("Remove row", color.size_lines.length <= 1, () => { color.size_lines.splice(lidx, 1); renderOrderBuilder(); });
+    return el("tr", {}, [el("td", {}, sizeSelect), el("td", {}, valueInput), el("td", {}, removeBtn)]);
+  }
+
+  /* ---- validation (mirrors OrderSerializer.validate()) ---- */
+  function validateOrderState(state) {
+    const errors = [];
+    if (!state.party) errors.push("Select a party.");
+    if (!state.order_date) errors.push("Set an order date.");
+    if (!state.items.length) errors.push("Add at least one product item.");
+    state.items.forEach((item, i) => {
+      if (!item.product) errors.push(`Item ${i + 1}: select a product.`);
+      if (!item.fabric_type) errors.push(`Item ${i + 1}: select a fabric type.`);
+      if (!item.approved_average) errors.push(`Item ${i + 1}: enter approved average.`);
+      if (item.price_per_piece === "" || Number(item.price_per_piece) < 0) errors.push(`Item ${i + 1}: enter the operator rate per piece.`);
+      if (!item.colors.length) errors.push(`Item ${i + 1}: add at least one color.`);
+      item.colors.forEach(color => {
+        if (!color.color) errors.push(`Item ${i + 1}: select a color.`);
+        if (state.order_type === "RATIO_BASED" && !(color.rolls || []).length) errors.push(`Item ${i + 1}: select at least one roll for each color (required for ratio-based orders).`);
+        if (!color.size_lines.length) errors.push(`Item ${i + 1}: add at least one size row per color.`);
+        color.size_lines.forEach(line => {
+          if (!line.size) errors.push(`Item ${i + 1}: select a size on every row.`);
+          const val = state.order_type === "FIXED_QUANTITY" ? line.quantity : line.ratio_part;
+          if (!val || Number(val) <= 0) errors.push(`Item ${i + 1}: enter a positive ${state.order_type === "FIXED_QUANTITY" ? "quantity" : "ratio part"} on every size row.`);
+        });
+      });
+    });
+    return [...new Set(errors)];
+  }
+
+  function buildPayload(state) {
+    const isFixed = state.order_type === "FIXED_QUANTITY";
+    return {
+      party: Number(state.party),
+      order_date: state.order_date,
+      order_type: state.order_type,
+      is_repeat: !!state.is_repeat,
+      remarks: state.remarks || "",
+      cutting_instruction: state.cutting_instruction || "",
+      items: state.items.map(item => ({
+        product: Number(item.product),
+        fabric_type: Number(item.fabric_type),
+        approved_average: item.approved_average === "" ? null : Number(item.approved_average),
+        price_per_piece: item.price_per_piece === "" ? 0 : Number(item.price_per_piece),
+        inner_required: !!item.inner_required,
+        fusing_required: !!item.fusing_required,
+        resting_needed: !!item.resting_needed,
+        colors: item.colors.map(color => ({
+          color: Number(color.color),
+          rolls: (color.rolls || []).map(Number),
+          half_roll: !!color.half_roll,
+          size_lines: color.size_lines.map(line => ({
+            size: Number(line.size),
+            quantity: isFixed ? (line.quantity === "" ? null : Number(line.quantity)) : null,
+            ratio_part: !isFixed ? (line.ratio_part === "" ? null : Number(line.ratio_part)) : null,
+          })),
+        })),
+      })),
+    };
+  }
+
+  function hydrateFromOrder(order) {
+    return {
+      party: order.party, order_date: order.order_date, order_type: order.order_type,
+      is_repeat: order.is_repeat, remarks: order.remarks || "", cutting_instruction: order.cutting_instruction || "",
+      items: order.items.map(item => ({
+        cid: nextClientId++, product: item.product, fabric_type: item.fabric_type,
+        approved_average: item.approved_average ?? "", price_per_piece: item.price_per_piece ?? "", inner_required: !!item.inner_required,
+        fusing_required: !!item.fusing_required, resting_needed: item.resting_needed,
+        colors: item.colors.map(color => ({
+          cid: nextClientId++, color: color.color, rolls: (color.rolls || []).map(Number), half_roll: !!color.half_roll,
+          size_lines: color.size_lines.map(line => ({ cid: nextClientId++, size: line.size, quantity: line.quantity ?? "", ratio_part: line.ratio_part ?? "" })),
+        })),
+      })),
+    };
+  }
+
+  async function saveOrder() {
+    const errors = validateOrderState(orderState);
+    if (errors.length) {
+      document.getElementById("builder-errors")?.remove();
+      const box = el("div", { class: "error-msg" }, errors.join(" "));
+      document.querySelector("#order-builder .card").prepend(box);
+      return;
+    }
+    const payload = buildPayload(orderState);
+    try {
+      if (editingOrderId) await apiPatch(`/orders/${editingOrderId}/`, payload);
+      else await apiPost("/orders/", payload);
+      editingOrderId = null;
+      editingOrderNumber = "";
+      orderState = blankOrder();
+      builderVisible = false;
+      renderOrderBuilder();
+      await refreshOrders();
+    } catch (e) { alert("Error: " + e.message); }
+  }
+
+  /* ---------------------------------------------------------------------
+     Orders table -- hand-rolled (crudPanel has no row-action support).
+     This is the primary view of the page; the builder above is hidden
+     until "+ New Order" / "Edit" is used.
+  --------------------------------------------------------------------- */
+  let ORDERS = [];
+
+  function orderTotalQty(order) {
+    if (order.order_type !== "FIXED_QUANTITY") return "—";
+    return order.items.reduce((s, it) => s + it.colors.reduce((s2, c) => s2 + c.size_lines.reduce((s3, l) => s3 + (Number(l.quantity) || 0), 0), 0), 0);
+  }
+  function orderItemsSummary(order) {
+    const colorCount = order.items.reduce((s, it) => s + it.colors.length, 0);
+    return `${order.items.length} item(s), ${colorCount} color(s)`;
+  }
+
+  async function refreshOrders() {
+    ORDERS = await fetchAll("/orders/");
+    renderOrdersTable();
+  }
+
+  function renderOrdersTable() {
+    const wrap = document.getElementById("orders-table-wrap");
+    wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Orders"), body]));
+    dataTable(body, {
+      columns: [
+        { label: "Order #", key: "order_number" },
+        { label: "Party", key: "party_name" },
+        { label: "Type", key: "order_type", render: o => o.order_type === "FIXED_QUANTITY" ? "Fixed" : "Ratio" },
+        { label: "Items", sortable: false, render: o => orderItemsSummary(o) },
+        { label: "Total Qty", value: o => (orderTotalQty(o) === "—" ? -1 : orderTotalQty(o)), render: o => String(orderTotalQty(o)) },
+        { label: "Status", key: "status", render: o => badge(o.status) },
+        { label: "Date", key: "order_date" },
+        { label: "Actions", sortable: false, render: o => {
+            const actions = [el("button", { class: "secondary", type: "button", onclick: () => viewOrder(o.id) }, "View")];
+            if (o.status === "DRAFT") {
+              actions.push(el("button", { class: "secondary", type: "button", onclick: () => editOrder(o.id) }, "Edit"));
+              actions.push(el("button", { type: "button", onclick: () => confirmOrder(o.id) }, "Confirm"));
+            }
+            if (o.status === "DRAFT" || o.status === "CONFIRMED") {
+              actions.push(el("button", { class: "danger", type: "button", onclick: () => cancelOrder(o.id) }, "Cancel"));
+            }
+            return el("div", { class: "form-inline" }, actions);
+          } },
+      ],
+      rows: ORDERS, pageSize: 12, initialSort: { key: "order_date", dir: "desc" },
+      searchPlaceholder: "Search orders — number, party, status…",
+      emptyText: "No orders yet — click “+ New Order” to create the first one.",
+    });
+  }
+
+  async function viewOrder(id) {
+    const order = await apiGet(`/orders/${id}/`);
+    const closeBtn = el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close");
+    const traceBox = el("div", { class: "muted" }, "Loading traceability...");
+    showCrudModal(`📋 ${order.order_number}`, [
+      detailGrid([["Party", order.party_name], ["Remarks", order.remarks || "—"]]),
+      el("div", { class: "section-title" }, "Items"),
+      renderOrderSummary(order),
+      el("div", { class: "section-title" }, "Quantity Traceability"),
+      traceBox,
+    ], [closeBtn], { wide: true });
+
+    try {
+      const t = await apiGet(`/orders/${id}/traceability/`);
+      traceBox.innerHTML = "";
+      traceBox.appendChild(detailGrid([
+        ["Issued to Operators", String(t.pieces_issued_to_operators)],
+        ["Returned by Operators", String(t.pieces_returned)],
+        ["Lost (Rejected Shortage)", String(t.pieces_lost)],
+        ["Sent to Finishing", String(t.pieces_sent_to_finishing)],
+        ["Finishing Completed", String(t.pieces_finishing_completed)],
+        ["Finishing Rejected", String(t.pieces_finishing_rejected)],
+        ["Dispatched", String(t.pieces_dispatched)],
+      ]));
+    } catch (e) {
+      traceBox.textContent = "Could not load traceability: " + e.message;
+    }
+  }
+
+  async function editOrder(id) {
+    const order = await apiGet(`/orders/${id}/`);
+    editingOrderId = order.id;
+    editingOrderNumber = order.order_number;
+    orderState = hydrateFromOrder(order);
+    builderVisible = true;
+    renderOrderBuilder();
+    document.getElementById("order-builder").scrollIntoView({ behavior: "smooth" });
+  }
+  async function confirmOrder(id) {
+    try { await apiPost(`/orders/${id}/confirm/`, {}); await refreshOrders(); }
+    catch (e) { alert("Error: " + e.message); }
+  }
+  async function cancelOrder(id) {
+    if (!(await showConfirm("Cancel this order? This can't be undone.", { title: "Cancel order", tone: "danger", confirmText: "Yes, cancel" }))) return;
+    try { await apiPost(`/orders/${id}/cancel/`, {}); notify.success("Order cancelled."); await refreshOrders(); }
+    catch (e) { notify.error(e.message); }
+  }
+
+  document.getElementById("new-order-btn").onclick = () => {
+    editingOrderId = null; editingOrderNumber = ""; orderState = blankOrder();
+    builderVisible = true;
+    renderOrderBuilder();
+    document.getElementById("order-builder").scrollIntoView({ behavior: "smooth" });
+  };
+
+  (async function init() {
+    await loadMasterData();
+    await refreshOrders();
+  })();
+</script>
+{% endblock %}

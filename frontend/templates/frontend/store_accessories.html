@@ -1,0 +1,36 @@
+{% extends "frontend/base.html" %}
+{% block title %}Accessories - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Accessories</h2>
+  <p class="page-subtitle">Zippers, buttons, thread, and other trims. Size / Spec is a short free-text field (e.g. 20mm zipper length, 18L button size, 40/2 thread count).</p>
+
+  <div id="panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-accessories", "Accessories");
+
+  crudPanel(document.getElementById("panel"), {
+    title: "Accessories",
+    endpoint: "/master/accessories/",
+    columns: [
+      { key: "accessory_type", label: "Type" },
+      { key: "name", label: "Name" },
+      { key: "size_spec", label: "Size / Spec" },
+      { key: "unit", label: "Unit" },
+      { key: "color_name", label: "Color" },
+      { render: a => badge(a.is_active ? "Active" : "Inactive"), label: "Status" },
+    ],
+    fields: [
+      { name: "accessory_type", label: "Type", type: "select", choices: ["ZIPPER", "BUTTON", "THREAD", "ELASTIC", "LABEL", "OTHER"], required: true },
+      { name: "name", label: "Name", required: true },
+      { name: "color", label: "Color (optional)", type: "select", optionsEndpoint: "/master/colors/", optionsLabel: "name" },
+      { name: "size_spec", label: "Size / Spec (e.g. 20mm, 18L, 40/2)" },
+      { name: "unit", label: "Unit", type: "select", choices: ["PIECES", "METERS", "YARDS", "ROLLS", "CONES", "DOZEN"], required: true },
+    ],
+    editable: true,
+  });
+</script>
+{% endblock %}

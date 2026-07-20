@@ -1,0 +1,150 @@
+{% extends "frontend/base.html" %}
+{% block title %}My Work - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">My Work</h2>
+  <p class="page-subtitle">Bundles assigned to you and your earnings.</p>
+
+  <div class="grid grid-3" id="stat-cards"></div>
+
+  <div class="card">
+    <h3>My Assigned Bundles</h3>
+    <div id="my-bundles" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h3>My Earnings</h3>
+    <div id="my-income" class="muted">Loading...</div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["OPERATOR"]);
+  renderShell("operator", "My Work");
+
+  async function loadStats(bundles, incomes) {
+    const cards = document.getElementById("stat-cards");
+    const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
+      el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
+    ]);
+    const active = bundles.filter(b => ["ASSIGNED", "IN_PROGRESS"].includes(b.status)).length;
+    const totalEarned = incomes.reduce((sum, i) => sum + Number(i.total_income || 0), 0);
+    const pending = incomes.filter(i => i.payment_status === "PENDING").reduce((sum, i) => sum + Number(i.total_income || 0), 0);
+    cards.appendChild(stat("Active Bundles", active, active ? "warning" : "success"));
+    cards.appendChild(stat("Total Earned", fmtMoney(totalEarned), "success"));
+    cards.appendChild(stat("Pending Payout", fmtMoney(pending), pending ? "warning" : "success"));
+  }
+
+  async function loadBundles() {
+    const wrap = document.getElementById("my-bundles");
+    try {
+      const bundles = await apiGet("/operators/assignments/my/");
+      wrap.innerHTML = "";
+      if (bundles.length === 0) {
+        wrap.textContent = "No bundles assigned to you right now.";
+      } else {
+        const table = el("table");
+        table.appendChild(el("thead", {}, el("tr", {}, ["Bundle", "Status", "Assigned", "Issued/Returned", "Shortage", "Defects", "Actions"].map(h => el("th", {}, h)))));
+        const tbody = el("tbody");
+        bundles.forEach(b => {
+          let actionCell = el("span", { class: "muted" }, "\u2014");
+          if (b.status === "ASSIGNED") actionCell = el("button", { type: "button", onclick: () => startBundle(b.id) }, "Start");
+          else if (b.status === "IN_PROGRESS") actionCell = el("button", { type: "button", onclick: () => openReturnModal(b) }, "Return Bundle");
+          tbody.appendChild(el("tr", {}, [
+            el("td", {}, b.bundle_number || String(b.bundle)),
+            el("td", {}, badge(b.status)),
+            el("td", {}, b.assigned_date || ""),
+            el("td", {}, `${b.issued_quantity ?? "\u2014"} / ${b.returned_quantity ?? "\u2014"}`),
+            el("td", {}, b.shortage_reason_status !== "NOT_APPLICABLE" ? badge(b.shortage_reason_status) : "\u2014"),
+            el("td", {}, String(b.defects)),
+            el("td", {}, actionCell),
+          ]));
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+      }
+      return bundles;
+    } catch (e) {
+      wrap.innerHTML = `<p class="error-msg">${e.message}</p>`;
+      return [];
+    }
+  }
+
+  async function startBundle(id) {
+    try {
+      await apiPost(`/operators/assignments/${id}/start/`, {});
+      await refreshAll();
+    } catch (e) { alert("Error: " + e.message); }
+  }
+
+  function openReturnModal(b) {
+    const returnedInput = numberInput("", () => {}, { min: "0", max: String(b.issued_quantity ?? ""), step: "1" });
+    const reasonInput = el("textarea", { rows: "2" });
+    const reasonRow = field("Shortage Reason (required if returned < issued)", reasonInput);
+    const errorBox = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      const returned_quantity = Number(returnedInput.value);
+      if (returnedInput.value === "" || returned_quantity < 0) {
+        errorBox.textContent = "Enter how many pieces you're returning."; errorBox.style.display = "block"; return;
+      }
+      const body = { returned_quantity };
+      if (returned_quantity < (b.issued_quantity ?? 0)) {
+        if (!reasonInput.value.trim()) { errorBox.textContent = "A reason is required when returning fewer pieces than issued."; errorBox.style.display = "block"; return; }
+        body.shortage_reason = reasonInput.value.trim();
+      }
+      try {
+        await apiPost(`/operators/assignments/${b.id}/return/`, body);
+        closeCrudModal();
+        await refreshAll();
+      } catch (e) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+    };
+    showCrudModal(`Return Bundle \u2014 ${b.bundle_number}`, [
+      errorBox,
+      el("p", { class: "muted" }, `Issued: ${b.issued_quantity ?? "\u2014"} pieces.`),
+      field("Pieces Returned", returnedInput),
+      reasonRow,
+    ], [
+      el("button", { type: "button", onclick: submit }, "Submit Return"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  async function loadIncome() {
+    const wrap = document.getElementById("my-income");
+    try {
+      const incomes = await apiGet("/operators/income/my/");
+      wrap.innerHTML = "";
+      if (incomes.length === 0) {
+        wrap.textContent = "No income records yet.";
+      } else {
+        const table = el("table");
+        table.appendChild(el("thead", {}, el("tr", {}, ["Period", "Bundles", "Pieces", "Amount", "Status"].map(h => el("th", {}, h)))));
+        const tbody = el("tbody");
+        incomes.forEach(i => {
+          tbody.appendChild(el("tr", {}, [
+            el("td", {}, `${i.period_start} \u2192 ${i.period_end}`),
+            el("td", {}, String(i.bundles_completed)),
+            el("td", {}, String(i.pieces_completed)),
+            el("td", {}, fmtMoney(i.total_income)),
+            el("td", {}, badge(i.payment_status)),
+          ]));
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+      }
+      return incomes;
+    } catch (e) {
+      wrap.innerHTML = `<p class="error-msg">${e.message}</p>`;
+      return [];
+    }
+  }
+
+  async function refreshAll() {
+    document.getElementById("stat-cards").innerHTML = "";
+    const [bundles, incomes] = await Promise.all([loadBundles(), loadIncome()]);
+    loadStats(bundles, incomes);
+  }
+
+  refreshAll();
+</script>
+{% endblock %}

@@ -1,0 +1,74 @@
+{% extends "frontend/base.html" %}
+{% block title %}Products - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Products / Styles</h2>
+  <p class="page-subtitle">Product codes are generated automatically — first 2 letters of the name, the current Nepali month, and a sequence that resets every month (e.g. TE-ASH-001). Add a reference image URL and a size-wise measurement chart so Admin can see the full style spec.</p>
+
+  <div id="panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["MERCHANDISE"]);
+  renderShell("merch-products", "Products");
+
+  // --- size-wise measurement chart editor (one line per measurement) ---
+  function chartToText(chart) {
+    return (chart || []).map(r => {
+      const sizes = Object.entries(r.sizes || {}).map(([k, v]) => `${k}:${v}`).join(", ");
+      return `${r.param || ""} | ${sizes}`;
+    }).join("\n");
+  }
+  function textToChart(text) {
+    return String(text || "").split("\n").map(line => line.trim()).filter(Boolean).map(line => {
+      const [param, rest] = line.split("|");
+      const sizes = {};
+      (rest || "").split(",").forEach(pair => {
+        const [k, v] = pair.split(":").map(s => (s || "").trim());
+        if (k) sizes[k.toUpperCase()] = v ?? "";
+      });
+      return { param: (param || "").trim(), sizes };
+    });
+  }
+  function openMeasurements(item, refresh) {
+    const ta = el("textarea", { rows: "8", style: "width:100%;font-family:monospace;", value: chartToText(item.measurement_chart) });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const save = async () => {
+      try {
+        await apiPatch(`/master/products/${item.id}/`, { measurement_chart: textToChart(ta.value) });
+        closeCrudModal(); notify.success("Measurement chart saved."); refresh();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`Measurements — ${item.code} ${item.name}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        "One measurement per line as  Param | S:val, M:val, L:val  — e.g.  Chest (in) | S:38, M:40, L:42"),
+      err, ta,
+    ], [
+      el("button", { type: "button", onclick: save }, "Save Chart"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ], { wide: true });
+  }
+
+  const panel = crudPanel(document.getElementById("panel"), {
+    title: "Products / Styles",
+    endpoint: "/master/products/",
+    columns: [
+      { render: p => (p.image_url
+          ? el("img", { src: p.image_url, style: "width:44px;height:44px;object-fit:cover;border-radius:8px;background:#faf7f5;" })
+          : el("span", { class: "muted" }, "—")), label: "Image", sortable: false },
+      { key: "code", label: "Code" },
+      { key: "name", label: "Name" },
+      { render: p => `${(p.measurement_chart || []).length} rows`, label: "Measurements" },
+      { render: p => badge(p.is_active ? "Active" : "Inactive"), label: "Status" },
+      { render: p => el("button", { class: "secondary", type: "button", onclick: () => openMeasurements(p, panel.refresh) }, "Measurements"),
+        label: "Chart", sortable: false },
+    ],
+    fields: [
+      { name: "name", label: "Product Name", required: true },
+      { name: "description", label: "Description", type: "textarea" },
+      { name: "image_url", label: "Reference Image URL", type: "text" },
+    ],
+    editable: true,
+  });
+</script>
+{% endblock %}

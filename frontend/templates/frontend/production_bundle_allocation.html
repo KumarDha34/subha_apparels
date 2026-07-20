@@ -1,0 +1,167 @@
+{% extends "frontend/base.html" %}
+{% block title %}Bundle Allocation - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Bundle Allocation</h2>
+  <p class="page-subtitle">Allocate a bundle to an operator — it starts immediately. Accessories are issued to the operator directly by Store (Store ▸ Stock ▸ Accessory ▸ Issue to Operator). Quality Pass/Fail is done later in Finishing, not here.</p>
+
+  <div id="assign-wrap"></div>
+  <div id="assignments-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["PRODUCTION_SUPERVISOR"]);
+  renderShell("production-bundle-allocation", "Bundle Allocation");
+
+  let MASTER = { bundles: [], operators: [] };
+  let assignState = { bundle: "", operator: "", issued_quantity: "" };
+
+  async function loadMaster() {
+    const [bundles, operators] = await Promise.all([
+      fetchAll("/cutting/bundles/?status=RECEIVED"),
+      fetchAll("/operators/operators/?is_active=true"),
+    ]);
+    MASTER = { bundles, operators };
+  }
+
+  function renderAssignForm() {
+    const wrap = document.getElementById("assign-wrap");
+    wrap.innerHTML = "";
+    if (!MASTER.bundles.length) {
+      wrap.appendChild(el("div", { class: "card" }, [
+        el("h3", {}, "Allocate Bundle"),
+        el("p", { class: "muted" }, "No bundles ready to allocate — Cutting sends them here with “Send to Production”."),
+      ]));
+      return;
+    }
+    const errorBox = el("div", { class: "error-msg", style: "display:none;" });
+    const form = el("div", { class: "form-inline" }, [
+      field("Bundle", selectEl({ onchange: e => { assignState.bundle = e.target.value; } },
+        MASTER.bundles.map(b => ({ value: b.id, label: `${b.bundle_number} — ${b.color_name}/${b.size_name} x${b.quantity}${b.order_number ? " · " + b.order_number : ""}` })), assignState.bundle, "Select bundle")),
+      field("Operator", selectEl({ onchange: e => assignState.operator = e.target.value },
+        MASTER.operators.map(o => ({ value: o.id, label: o.name })), assignState.operator, "Select operator")),
+      field("Issued Qty (optional)", numberInput(assignState.issued_quantity, v => assignState.issued_quantity = v, { min: "0", placeholder: "defaults to bundle qty" })),
+    ]);
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "Allocate Bundle to Operator"),
+      errorBox, form,
+      el("div", { class: "form-inline", style: "margin-top:0.85rem;" }, [el("button", { type: "button", onclick: allocate }, "Allocate")]),
+    ]));
+    wrap._errorBox = errorBox;
+  }
+
+  async function allocate() {
+    const errorBox = document.getElementById("assign-wrap")._errorBox;
+    if (errorBox) errorBox.style.display = "none";
+    if (!assignState.bundle || !assignState.operator) {
+      if (errorBox) { errorBox.textContent = "Select a bundle and an operator."; errorBox.style.display = "block"; }
+      return;
+    }
+    try {
+      const body = { bundle: Number(assignState.bundle), operator: Number(assignState.operator) };
+      if (assignState.issued_quantity) body.issued_quantity = Number(assignState.issued_quantity);
+      await apiPost("/operators/assignments/", body);
+      notify.success("Bundle allocated — operator started.");
+      assignState = { bundle: "", operator: "", issued_quantity: "" };
+      await loadMaster();
+      renderAssignForm();
+      await refreshAssignments();
+    } catch (e) {
+      if (errorBox) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+      else notify.error(e.message);
+    }
+  }
+
+  async function returnAssignment(a) {
+    const qty = await showPrompt({ title: `Return — ${a.bundle_number}`,
+      label: `Pieces returned by ${a.operator_name} (issued ${a.issued_quantity})`,
+      number: true, min: 0, max: a.issued_quantity, value: a.issued_quantity, confirmText: "Continue" });
+    if (qty === null || qty === "") return;
+    const returned = Number(qty);
+    const body = { returned_quantity: returned };
+    if (returned < a.issued_quantity) {
+      const reason = await showPrompt({ title: "Shortage — reason required",
+        message: `${a.issued_quantity - returned} piece(s) short. Give a reason — an Admin reviews it before it's accepted.`,
+        label: "Reason for the missing pieces", multiline: true, required: true, confirmText: "Submit for review" });
+      if (!reason) { notify.warning("A reason is required when returned pieces are fewer than issued."); return; }
+      body.shortage_reason = reason;
+    }
+    try { await apiPost(`/operators/assignments/${a.id}/return/`, body); notify.success("Pieces returned."); await refreshAssignments(); }
+    catch (e) { notify.error(e.message); }
+  }
+
+  async function reassignAssignment(a) {
+    if (!MASTER.operators.length) { notify.warning("No operators available to reassign to."); return; }
+    let chosen = "";
+    const sel = selectEl({ onchange: e => chosen = e.target.value }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), "", "Select operator");
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`Reassign — ${a.bundle_number}`, [err, field("New operator", sel)], [
+      el("button", { type: "button", onclick: async () => {
+        if (!chosen) { err.textContent = "Select an operator."; err.style.display = "block"; return; }
+        try { await apiPost(`/operators/assignments/${a.id}/reassign/`, { operator: Number(chosen) }); closeCrudModal(); notify.success("Reassigned."); await refreshAssignments(); }
+        catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Reassign"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  async function reviewShortage(a, approved) {
+    const notes = await showPrompt({ title: approved ? "Approve shortage" : "Reject shortage",
+      message: `Reason given: ${a.shortage_reason || "—"}`, label: approved ? "Notes (optional)" : "Why are you rejecting?",
+      multiline: true, required: !approved, confirmText: approved ? "Approve" : "Reject", tone: approved ? "brand" : "danger" });
+    if (notes === null) return;
+    try { await apiPost(`/operators/assignments/${a.id}/review_shortage/`, { approved, notes }); notify.success(approved ? "Approved." : "Rejected."); await refreshAssignments(); }
+    catch (e) { notify.error(e.message); }
+  }
+
+  function renderShortageCell(a) {
+    if (a.shortage_reason_status === "NOT_APPLICABLE") return "—";
+    if (a.shortage_reason_status === "PENDING_REVIEW") {
+      if (Auth.getRole() === "ADMIN") {
+        return el("div", {}, [
+          badge(a.shortage_reason_status), el("div", { class: "muted", style: "margin:0.3rem 0;" }, a.shortage_reason),
+          el("div", { class: "form-inline" }, [
+            el("button", { type: "button", onclick: () => reviewShortage(a, true) }, "Approve"),
+            el("button", { class: "secondary", type: "button", onclick: () => reviewShortage(a, false) }, "Reject"),
+          ]),
+        ]);
+      }
+      return el("div", {}, [badge(a.shortage_reason_status), el("div", { class: "muted", style: "margin-top:0.3rem;" }, a.shortage_reason)]);
+    }
+    return el("div", {}, [badge(a.shortage_reason_status), el("div", { class: "muted", style: "margin-top:0.3rem;" }, a.shortage_review_notes || "")]);
+  }
+
+  async function refreshAssignments() {
+    const wrap = document.getElementById("assignments-wrap");
+    wrap.innerHTML = "Loading...";
+    try {
+      const assignments = await fetchAll("/operators/assignments/");
+      wrap.innerHTML = "";
+      const body = el("div", {});
+      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Assignments"), body]));
+      dataTable(body, {
+        columns: [
+          { label: "Bundle", key: "bundle_number" },
+          { label: "Operator", key: "operator_name" },
+          { label: "Issued/Returned", value: a => Number(a.returned_quantity ?? a.issued_quantity ?? 0), render: a => `${a.issued_quantity ?? "—"} / ${a.returned_quantity ?? "—"}` },
+          { label: "Status", key: "status", render: a => badge(a.status) },
+          { label: "Shortage Review", value: a => a.shortage_reason_status, render: a => renderShortageCell(a) },
+          { label: "Actions", sortable: false, render: a => {
+              const actions = [];
+              if (a.status === "IN_PROGRESS") actions.push(el("button", { type: "button", onclick: () => returnAssignment(a) }, "Return"));
+              actions.push(el("button", { class: "secondary", type: "button", onclick: () => reassignAssignment(a) }, "Reassign"));
+              return el("div", { class: "form-inline" }, actions);
+            } },
+        ], rows: assignments, pageSize: 12, searchPlaceholder: "Search assignments — bundle, operator, status…",
+        emptyText: "No assignments yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  (async function init() {
+    await loadMaster();
+    renderAssignForm();
+    await refreshAssignments();
+  })();
+</script>
+{% endblock %}

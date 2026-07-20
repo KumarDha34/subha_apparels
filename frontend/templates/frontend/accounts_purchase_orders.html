@@ -1,0 +1,44 @@
+{% extends "frontend/base.html" %}
+{% block title %}Purchase Orders - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Purchase Orders</h2>
+  <p class="page-subtitle">Created by Store from the Purchase Orders workflow — read-only here.</p>
+
+  <div id="po-table-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ACCOUNTS"]);
+  renderShell("accounts-purchase-orders", "Purchase Orders");
+
+  async function refresh() {
+    const wrap = document.getElementById("po-table-wrap");
+    wrap.innerHTML = "Loading...";
+    try {
+      const items = await fetchAll("/accounts/purchase-orders/");
+      wrap.innerHTML = "";
+      const body = el("div", {});
+      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Purchase Orders"), body]));
+      dataTable(body, {
+        columns: [
+          { label: "PO #", key: "po_number" },
+          { label: "Vendor / Party", value: po => po.vendor_name || po.party_name || "", render: po => po.vendor_name || po.party_name || "—" },
+          { label: "Type", value: po => po.po_type.replace(/_/g, " "), render: po => po.po_type.replace(/_/g, " ") },
+          { label: "Status", key: "receipt_status", render: po => badge(po.receipt_status) },
+          { label: "Date", key: "po_date" },
+          { label: "Actions", sortable: false, render: po => el("button", { class: "secondary", type: "button", onclick: () => viewPO(po) }, "View") },
+        ], rows: items, pageSize: 12, initialSort: { key: "po_date", dir: "desc" },
+        searchPlaceholder: "Search purchase orders…", emptyText: "No purchase orders yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  function viewPO(po) {
+    showCrudModal(`📥 ${po.po_number}`, [renderPOSummary(po)],
+      [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+  }
+
+  refresh();
+</script>
+{% endblock %}

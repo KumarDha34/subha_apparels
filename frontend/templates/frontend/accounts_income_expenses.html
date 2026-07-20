@@ -1,0 +1,71 @@
+{% extends "frontend/base.html" %}
+{% block title %}Income & Expenses - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Income &amp; Expenses</h2>
+  <p class="page-subtitle">Client payments (advance/final) and operational expenses not tied to a purchase order.</p>
+
+  <div id="panels"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ACCOUNTS"]);
+  renderShell("accounts-income-expenses", "Income & Expenses");
+
+  const panels = document.getElementById("panels");
+
+  crudPanel(panels, {
+    title: "Client Income (Advance / Final Payments)",
+    endpoint: "/accounts/income/",
+    columns: [
+      { key: "order_number", label: "Order #" },
+      { key: "income_type", label: "Type" },
+      { key: "amount", label: "Amount" },
+      { key: "received_date", label: "Date" },
+    ],
+    fields: [
+      { name: "order", label: "Order", type: "select", optionsEndpoint: "/orders/", optionsLabel: "order_number" },
+      { name: "income_type", label: "Type", type: "select", choices: ["ADVANCE", "FINAL", "OTHER"], required: true },
+      { name: "amount", label: "Amount", type: "number", required: true },
+      { name: "received_date", label: "Received Date", type: "date", required: true, allowPast: true },
+      { name: "remarks", label: "Remarks", type: "textarea" },
+    ],
+    editable: true,
+  });
+
+  crudPanel(panels, {
+    title: "Operational Expenses",
+    endpoint: "/accounts/expenses/",
+    columns: [
+      { key: "category", label: "Category" },
+      { key: "amount", label: "Amount" },
+      { key: "expense_date", label: "Date" },
+    ],
+    fields: [
+      { name: "category", label: "Category", type: "select", choices: ["RENT", "UTILITIES", "SALARY", "MAINTENANCE", "OTHER"], required: true },
+      { name: "amount", label: "Amount", type: "number", required: true },
+      { name: "expense_date", label: "Expense Date", type: "date", required: true, allowPast: true },
+      { name: "remarks", label: "Remarks", type: "textarea" },
+    ],
+    editable: true,
+  });
+</script>
+{% endblock %}
+
+
+{% comment %} 
+AT the cutting when we cut and the bundle is created then we seen the send to production and when we send to production then hide the send to production. If there is bundle need to send then onl;y send shows the button otherwise hide it.
+After we send to the production there from the allocation we allocate the bundle to the operator but the accessory is directly allocate to the operator from the store. When we allocate the bundle to the operator don't allows them to start manually just make it auto start immediately when we allocate te bundle
+The quality check QC fail and pass is not in the production it is performed in the finishing. So remove the QC fail or pass from the production.So when we send the pieces to different department i.e. when we send to the finishing department we test the qiality pass,fail,alter. After that when we dispatched just show the order and when we select the order shown the quantity that we have at final and the finishing manager entered the quantity to dispatch we don;t require Mode of Transport and other field nust order and quantity to dispatch
+remove the accessory and bundle allocation button just make allocate. and when we send the received pieces to different department i.e. Washing,printing,Finishing,Embroidery. AT that when we received the less pieces then the send then allow them to write reason compulsory if then return less than the received umtil the admin approved that reason don't received.
+It helps to track how many pieces do we cut,how many do we received at last i.e. track each pieces (how many pieces we lost at which department i.e. printing,washing,embroidery,finishing,(operator gives less))
+and we want to seen the below page in the Accoout Dashboard with full functionable
+Quotations
+Invoices
+Party Ledger
+Purchase Bills
+Supplier Ledger
+Sales, P&L & Cash
+
+Make all the above page functionality simple,flexible,smooth and correctly functionable 
+{% endcomment %}

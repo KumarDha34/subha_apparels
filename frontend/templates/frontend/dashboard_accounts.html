@@ -1,0 +1,57 @@
+{% extends "frontend/base.html" %}
+{% block title %}Accounts - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Accounts Dashboard</h2>
+  <p class="page-subtitle">Every rupee in and out — purchases, invoices, payments, income, and expenses.</p>
+
+  <div class="grid grid-3" id="summary-cards"></div>
+
+  <div class="grid grid-2">
+    <div class="card">
+      <h3>Income Breakdown</h3>
+      <div id="income-breakdown"></div>
+    </div>
+    <div class="card">
+      <h3>Expense Breakdown</h3>
+      <div id="expense-breakdown"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Quick Links</h3>
+    <div class="form-inline">
+      <a class="btn" href="/accounts/payments/">Payments</a>
+      <a class="btn secondary" href="/accounts/purchase-orders/">Purchase Orders</a>
+      <a class="btn secondary" href="/accounts/income-expenses/">Income &amp; Expenses</a>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ACCOUNTS"]);
+  renderShell("accounts-dashboard", "Accounts");
+
+  async function loadSummary() {
+    try {
+      const s = await apiGet("/accounts/summary/");
+      const cards = document.getElementById("summary-cards");
+      const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
+        el("div", { class: "value" }, fmtMoney(value)), el("div", { class: "label" }, label),
+      ]);
+      cards.appendChild(stat("Total Income", s.total_income, "success"));
+      cards.appendChild(stat("Total Expenses", s.total_expenses, "danger"));
+      cards.appendChild(stat("Net Profit", s.net_profit));
+
+      const ib = document.getElementById("income-breakdown");
+      Object.entries(s.income_breakdown).forEach(([k, v]) => ib.appendChild(el("div", {}, `${k}: ${fmtMoney(v)}`)));
+
+      const eb = document.getElementById("expense-breakdown");
+      Object.entries(s.expense_breakdown).forEach(([k, v]) => eb.appendChild(el("div", {}, `${k}: ${fmtMoney(v)}`)));
+    } catch (e) {
+      document.getElementById("summary-cards").innerHTML = `<p class="error-msg">${e.message}</p>`;
+    }
+  }
+  loadSummary();
+</script>
+{% endblock %}

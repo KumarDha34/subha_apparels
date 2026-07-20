@@ -1,0 +1,261 @@
+{% extends "frontend/base.html" %}
+{% block title %}Record Cut - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Record Cut</h2>
+  <p class="page-subtitle">Start cutting, then record each lay — layer length, number of layers, and pieces cut per size in one layer. Bundles are created automatically: one bundle per cut position, each holding as many pieces as there are layers.</p>
+
+  <div id="orders-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["CUTTING_SUPERVISOR"]);
+  renderShell("cutting-record-cut", "Record Cut");
+
+  let MASTER = { sizes: [] };
+  const orderCache = new Map();
+  const cutState = new Map();   // cutting_order.id -> { layer_length, no_of_layers, remarks, perLayer:{sizeId:val} }
+  let ORDERS = [];
+
+  async function loadMaster() {
+    MASTER.sizes = await fetchAll("/master/sizes/?is_active=true");
+  }
+  async function getOrder(id) {
+    if (!orderCache.has(id)) orderCache.set(id, await apiGet(`/orders/${id}/`));
+    return orderCache.get(id);
+  }
+
+  /** Match this cutting order's roll to a colour line on the order (prefer an
+   *  explicit roll assignment, else the roll's colour). */
+  function findColorEntry(orderData, c) {
+    const item = (orderData.items || []).find(i => i.id === c.order_item);
+    if (!item) return null;
+    let ce = item.colors.find(x => (x.rolls || []).includes(c.fabric_issued));
+    if (!ce && c.color != null) ce = item.colors.find(x => x.color === c.color);
+    return ce ? { item, colorEntry: ce } : null;
+  }
+
+  async function startCutting(c) {
+    try { await apiPost(`/cutting/cutting-orders/${c.id}/start_cutting/`, {}); await refresh(); }
+    catch (e) { notify.error(e.message); }
+  }
+  async function completeCutting(c) {
+    try {
+      await apiPost(`/cutting/cutting-orders/${c.id}/complete_cutting/`, {});
+      notify.success("Cutting completed — bundles are ready to send to Production.");
+      await refresh();
+    } catch (e) { notify.error(e.message); }
+  }
+  async function approveOverride(c, approved) {
+    const remarks = prompt(approved ? "Remarks for approving this override (optional):" : "Remarks for rejecting this override:");
+    if (remarks === null) return;
+    try { await apiPost(`/cutting/cutting-orders/${c.id}/approve_override/`, { approved, remarks }); await refresh(); }
+    catch (e) { notify.error(e.message); }
+  }
+  async function returnFabric(c) {
+    const qty = prompt(`Quantity to return to Store (max ${c.remaining_quantity}):`);
+    if (qty === null || !qty) return;
+    try { await apiPost(`/cutting/cutting-orders/${c.id}/return_fabric/`, { quantity: Number(qty), remarks: "" }); await refresh(); }
+    catch (e) { notify.error(e.message); }
+  }
+
+  async function submitLayer(c, state, errorBox) {
+    errorBox.style.display = "none";
+    const sizes = Object.entries(state.perLayer)
+      .filter(([, v]) => v && Number(v) > 0)
+      .map(([size, v]) => ({ size: Number(size), pieces_per_layer: Number(v) }));
+    if (!state.layer_length || Number(state.layer_length) <= 0) { errorBox.textContent = "Enter the layer length."; errorBox.style.display = "block"; return; }
+    if (!state.no_of_layers || Number(state.no_of_layers) <= 0) { errorBox.textContent = "Enter the number of layers."; errorBox.style.display = "block"; return; }
+    if (!sizes.length) { errorBox.textContent = "Enter pieces-per-layer for at least one size."; errorBox.style.display = "block"; return; }
+    try {
+      await apiPost(`/cutting/cutting-orders/${c.id}/record_layer/`, {
+        layer_length: Number(state.layer_length), no_of_layers: Number(state.no_of_layers),
+        remarks: state.remarks || "", sizes,
+      });
+      cutState.delete(c.id);
+      notify.success("Lay recorded — bundles auto-created.");
+      await refresh();
+    } catch (e) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+  }
+
+  async function renderLayerForm(c, container) {
+    if (!cutState.has(c.id)) cutState.set(c.id, { layer_length: "", no_of_layers: "", remarks: "", perLayer: {} });
+    const state = cutState.get(c.id);
+    const errorBox = el("div", { class: "error-msg", style: "display:none;" });
+    const isRatio = c.order_type === "RATIO_BASED";
+
+    let sizeRows;
+    const orderData = c.order ? await getOrder(c.order) : null;
+    const found = orderData ? findColorEntry(orderData, c) : null;
+    if (found) {
+      sizeRows = found.colorEntry.size_lines.map(sl => ({ size: sl.size, size_name: sl.size_name, ordered: sl.quantity, ratio: sl.ratio_part }));
+      if (isRatio) sizeRows.forEach(sr => { if (state.perLayer[sr.size] === undefined && sr.ratio != null) state.perLayer[sr.size] = String(sr.ratio); });
+    } else {
+      sizeRows = MASTER.sizes.map(s => ({ size: s.id, size_name: s.name }));
+    }
+
+    const totalCells = {};
+    const table = el("table", { class: "cut-sheet" });
+    table.appendChild(el("thead", {}, el("tr", {}, ["Size", isRatio ? "Ratio" : "Ordered", "Pieces / layer", "Total (× layers)"].map(h => el("th", {}, h)))));
+    const tbody = el("tbody");
+    sizeRows.forEach(sr => {
+      const input = numberInput(state.perLayer[sr.size] ?? "", v => { state.perLayer[sr.size] = v; updatePreview(); },
+        { min: "0", step: "1", class: "cut-input", placeholder: "0" });
+      const totalTd = el("td", { class: "cut-info" }, "0");
+      totalCells[sr.size] = totalTd;
+      tbody.appendChild(el("tr", {}, [
+        el("td", { class: "cut-size" }, sr.size_name),
+        el("td", { class: "cut-info" }, isRatio ? String(sr.ratio ?? "—") : String(sr.ordered ?? "—")),
+        el("td", {}, input), totalTd,
+      ]));
+    });
+    table.appendChild(tbody);
+
+    const previewNode = el("div", { class: "muted", style: "margin:0.6rem 0;" });
+    function updatePreview() {
+      const perSum = sizeRows.reduce((s, sr) => s + (Number(state.perLayer[sr.size]) || 0), 0);
+      const n = Number(state.no_of_layers) || 0;
+      const len = Number(state.layer_length) || 0;
+      sizeRows.forEach(sr => { totalCells[sr.size].textContent = String((Number(state.perLayer[sr.size]) || 0) * n); });
+      previewNode.innerHTML = "";
+      previewNode.append(
+        `Avg/pc: ${perSum ? (len / perSum).toFixed(3) : "—"} m · This lay makes ${perSum * n} pieces · `,
+        el("strong", {}, `${perSum} bundle(s) × ${n} pcs each`));
+    }
+
+    const layerFields = el("div", { class: "cut-fields" }, [
+      field("Layer Length (m)", numberInput(state.layer_length, v => { state.layer_length = v; updatePreview(); }, { min: "0", step: "0.01", placeholder: "e.g. 6.2" })),
+      field("No. of Layers", numberInput(state.no_of_layers, v => { state.no_of_layers = v; updatePreview(); }, { min: "1", step: "1", placeholder: "e.g. 15" })),
+    ]);
+
+    container.appendChild(el("div", {}, [
+      errorBox, layerFields,
+      el("div", { class: "section-title" }, "Pieces per layer (the marker ratio across the fabric width)"),
+      el("div", { class: "cut-sheet-wrap" }, table),
+      previewNode,
+      field("Lay Remarks (optional)", el("input", { type: "text", value: state.remarks || "", oninput: e => state.remarks = e.target.value })),
+      el("div", { class: "form-inline", style: "margin-top:0.7rem;" }, [
+        el("button", { type: "button", onclick: () => submitLayer(c, state, errorBox) }, "Record Lay & Auto-create Bundles"),
+      ]),
+    ]));
+    updatePreview();
+  }
+
+  async function renderRecorded(c, container) {
+    const bundles = await fetchAll(`/cutting/bundles/?cutting_order=${c.id}`);
+    const totalPcs = bundles.reduce((s, b) => s + b.quantity, 0);
+    container.appendChild(el("div", { class: "section-title" }, "Cut so far — auto-created bundles"));
+    container.appendChild(el("div", { class: "muted", style: "margin-bottom:0.5rem;" },
+      `Layers spread: ${c.no_of_layers || 0} · Fabric used: ${c.fabric_used_quantity || 0} m · Bundles: ${bundles.length} (${totalPcs} pcs)`));
+    if (bundles.length) {
+      const box = el("div", {});
+      dataTable(box, {
+        columns: [
+          { label: "Bundle #", key: "bundle_number" }, { label: "Color", key: "color_name" }, { label: "Size", key: "size_name" },
+          { label: "Qty", key: "quantity", value: b => Number(b.quantity) }, { label: "Status", key: "status", render: b => badge(b.status) },
+        ], rows: bundles, pageSize: 6, searchable: bundles.length > 6,
+      });
+      container.appendChild(box);
+    } else {
+      container.appendChild(el("p", { class: "muted" }, "No lays recorded yet — record the first lay above."));
+    }
+    if (bundles.length) {
+      const disabled = c.average_status === "DONT_CUT" && !c.average_override_approved;
+      const attrs = { type: "button", class: "success", onclick: () => completeCutting(c) };
+      if (disabled) attrs.disabled = "disabled";
+      container.appendChild(el("div", { class: "form-inline", style: "margin-top:0.7rem;" }, [
+        el("button", attrs, "✓ Complete Cutting"),
+        disabled ? el("span", { class: "muted" }, "Awaiting Admin approval for over-consumption.") : null,
+      ]));
+    }
+  }
+
+  async function renderOrderCard(c) {
+    const isAdmin = Auth.getRole() === "ADMIN";
+    const infoGrid = detailGrid([
+      ["Cutting #", c.cutting_number],
+      ["Order", c.order_number || "No Order"],
+      ["Product", c.product_code ? `${c.product_code} — ${c.product_name}` : (c.product_name || "—")],
+      ["Company / Party", c.party_name || "—"],
+      ["Fabric / Color", `${c.fabric_type_name || "?"} / ${c.color_name || "?"}`],
+      ["Order Type", c.order_type ? c.order_type.replace("_", " ") : "—"],
+      ["Fabric Issued", `${c.fabric_issued_quantity} m`],
+      ["Fabric Used", `${c.fabric_used_quantity || 0} m`],
+      ["Remaining", `${c.remaining_quantity} m`],
+      ["Approved Average", c.approved_average != null ? `${c.approved_average} m/pc` : "—"],
+      ["Actual Average", c.actual_average != null ? `${c.actual_average} m/pc` : "—"],
+      ["Status", badge(c.status)],
+    ]);
+
+    const banners = [];
+    if (c.cutting_instruction) {
+      banners.push(el("div", { class: "mode-banner mode-ratio" }, [el("strong", {}, "✂️ Cutting instruction: "), c.cutting_instruction]));
+    }
+    if (c.order_type === "RATIO_BASED" && (c.ratio || []).length) {
+      const ratioText = c.ratio.map(r => `${r.size_name}:${r.ratio_part}`).join("  ·  ");
+      banners.push(el("div", { class: "mode-banner mode-fixed" }, [el("strong", {}, "Ratio: "), ratioText]));
+    }
+    if (c.order_remarks) {
+      banners.push(el("div", { class: "muted", style: "margin:0.2rem 0 0.6rem;" }, [el("strong", {}, "Order remarks: "), c.order_remarks]));
+    }
+
+    const body = el("div", {});
+    if (c.status === "RECEIVED") {
+      body.appendChild(el("p", { class: "muted" }, "Fabric received. Start cutting to record lays."));
+      body.appendChild(el("div", { class: "form-inline" }, [el("button", { type: "button", onclick: () => startCutting(c) }, "▶ Start Cutting")]));
+    } else {
+      if (c.average_status === "DONT_CUT") {
+        const overrideBox = isAdmin
+          ? el("div", { class: "form-inline" }, [
+              el("button", { type: "button", onclick: () => approveOverride(c, true) }, "Approve Override"),
+              el("button", { class: "secondary", type: "button", onclick: () => approveOverride(c, false) }, "Reject"),
+            ])
+          : el("p", { class: "muted" }, "Awaiting Admin approval.");
+        body.appendChild(el("div", { class: "mode-banner mode-ratio" }, [
+          badge("DONT_CUT"), ` Actual average ${c.actual_average} exceeds approved ${c.approved_average}. `, overrideBox,
+        ]));
+      }
+      await renderLayerForm(c, body);
+      await renderRecorded(c, body);
+    }
+
+    const returnBtn = c.remaining_quantity > 0
+      ? el("div", { class: "form-inline", style: "margin-top:0.6rem;" }, [
+          el("button", { class: "secondary", type: "button", onclick: () => returnFabric(c) }, `↩ Return ${c.remaining_quantity} m to Store`)])
+      : null;
+
+    return el("div", { class: "card" }, [
+      el("div", { class: "page-header-row" }, [el("h3", {}, `✂️ ${c.cutting_number}`), badge(c.average_status)]),
+      infoGrid, ...banners, body, returnBtn,
+    ]);
+  }
+
+  async function renderOrders() {
+    const wrap = document.getElementById("orders-wrap");
+    wrap.innerHTML = "";
+    if (!ORDERS.length) {
+      wrap.appendChild(el("p", { class: "muted" }, "No cutting orders ready to cut right now — receive fabric first."));
+      return;
+    }
+    for (const c of ORDERS) wrap.appendChild(await renderOrderCard(c));
+  }
+
+  async function refresh() {
+    const wrap = document.getElementById("orders-wrap");
+    wrap.innerHTML = "Loading...";
+    try {
+      const [received, cutting] = await Promise.all([
+        fetchAll("/cutting/cutting-orders/?status=RECEIVED"),
+        fetchAll("/cutting/cutting-orders/?status=CUTTING"),
+      ]);
+      ORDERS = [...received, ...cutting];
+      await renderOrders();
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  (async function init() {
+    await loadMaster();
+    await refresh();
+  })();
+</script>
+{% endblock %}

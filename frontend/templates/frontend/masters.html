@@ -1,0 +1,82 @@
+{% extends "frontend/base.html" %}
+{% block title %}Master Data - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Master Data</h2>
+  <p class="page-subtitle">Shared reference data used across every dashboard.</p>
+  <div class="grid grid-2" id="panels"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN"]);
+  renderShell("masters", "Master Data");
+  const panels = document.getElementById("panels");
+
+  crudPanel(panels, {
+    title: "Parties / Customers",
+    endpoint: "/master/parties/",
+    columns: [{ key: "name", label: "Name" }, { key: "phone", label: "Phone" }, { key: "email", label: "Email" }],
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "contact_person", label: "Contact Person" },
+      { name: "phone", label: "Phone" },
+      { name: "email", label: "Email" },
+    ],
+  });
+
+  crudPanel(panels, {
+    title: "Products / Styles",
+    endpoint: "/master/products/",
+    columns: [{ key: "code", label: "Code" }, { key: "name", label: "Name" }],
+    fields: [
+      { name: "code", label: "Code", required: true },
+      { name: "name", label: "Name", required: true },
+    ],
+  });
+
+  crudPanel(panels, {
+    title: "Colors",
+    endpoint: "/master/colors/",
+    columns: [{ key: "name", label: "Name" }, { key: "hex_code", label: "Hex" }],
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "hex_code", label: "Hex Code (#RRGGBB)" },
+    ],
+  });
+
+  crudPanel(panels, {
+    title: "Fabric Types",
+    endpoint: "/master/fabric-types/",
+    columns: [{ key: "name", label: "Name" }, { key: "gsm", label: "GSM" }, { key: "composition", label: "Composition" }],
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "gsm", label: "GSM", type: "number" },
+      { name: "composition", label: "Composition" },
+    ],
+  });
+
+  crudPanel(panels, {
+    title: "Sizes",
+    endpoint: "/master/sizes/",
+    columns: [{ key: "name", label: "Name" }, { key: "display_order", label: "Order" }],
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "display_order", label: "Display Order", type: "number" },
+    ],
+  });
+
+  crudPanel(panels, {
+    title: "Vendors / Suppliers",
+    endpoint: "/master/vendors/",
+    columns: [{ key: "company_name", label: "Company" }, { key: "phone", label: "Phone" }, { key: "payment_terms", label: "Terms" }],
+    fields: [
+      { name: "company_name", label: "Company Name", required: true },
+      { name: "contact_person", label: "Contact Person" },
+      { name: "phone", label: "Phone", required: true },
+      { name: "email", label: "Email" },
+      { name: "gst_number", label: "GST Number" },
+      { name: "payment_terms", label: "Payment Terms", type: "select", choices: ["NET_15", "NET_30", "NET_45", "COD", "ADVANCE"] },
+    ],
+  });
+</script>
+{% endblock %}

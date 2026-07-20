@@ -1,0 +1,36 @@
+{% extends "frontend/base.html" %}
+{% block title %}Accessories Received - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Accessories Received</h2>
+  <p class="page-subtitle">Accessories (zipper, button, thread, etc.) issued from Store — for a specific order or general stock.</p>
+
+  <div id="table-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["PRODUCTION_SUPERVISOR"]);
+  renderShell("production-accessories", "Accessories Received");
+
+  async function refresh() {
+    const wrap = document.getElementById("table-wrap");
+    wrap.innerHTML = "Loading...";
+    try {
+      const issues = await fetchAll("/production/accessory-issues/");
+      wrap.innerHTML = "";
+      const body = el("div", {});
+      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Accessories Received"), body]));
+      dataTable(body, {
+        columns: [
+          { label: "Issue #", key: "issue_number" }, { label: "Order", key: "order_number", render: i => i.order_number || badge("No Order") },
+          { label: "Accessory", key: "accessory_label" }, { label: "Quantity", key: "issued_quantity", value: i => Number(i.issued_quantity) },
+          { label: "Date", key: "issued_date", render: i => i.issued_date || "—" }, { label: "Remarks", render: i => i.remarks || "—" },
+        ], rows: issues, pageSize: 12, initialSort: { key: "issue_number", dir: "asc" },
+        searchPlaceholder: "Search accessory issues…", emptyText: "No accessories issued yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  refresh();
+</script>
+{% endblock %}

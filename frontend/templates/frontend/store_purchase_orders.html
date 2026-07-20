@@ -1,0 +1,145 @@
+{% extends "frontend/base.html" %}
+{% block title %}Purchase Orders - GMS{% endblock %}
+{% block content %}
+  <div class="page-header-row">
+    <div>
+      <h2 class="page-title">Purchase Orders</h2>
+      <p class="page-subtitle">All purchases, across order-specific, bulk, and customer-supplied.</p>
+    </div>
+    <div class="form-inline">
+      <a class="btn secondary" href="/store/purchases/order-specific/">🎯 Order-Specific</a>
+      <a class="btn secondary" href="/store/purchases/bulk/">📦 Bulk</a>
+      <a class="btn secondary" href="/store/purchases/customer-supplied/">🎁 Customer Supplied</a>
+    </div>
+  </div>
+
+  <div id="filters"></div>
+  <div id="po-table-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-purchases", "Purchase Orders");
+
+  let POS = [];
+  const filters = { po_type: "", receipt_status: "" };
+
+  function poTypeLabel(t) { return t.replace(/_/g, " "); }
+
+  async function refresh() {
+    const params = new URLSearchParams();
+    if (filters.po_type) params.set("po_type", filters.po_type);
+    if (filters.receipt_status) params.set("receipt_status", filters.receipt_status);
+    const qs = params.toString();
+    POS = await fetchAll(`/accounts/purchase-orders/${qs ? "?" + qs : ""}`);
+    renderTable();
+  }
+
+  function renderFilters() {
+    const wrap = document.getElementById("filters");
+    wrap.innerHTML = "";
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "form-inline" }, [
+        field("Type", selectEl({ onchange: e => { filters.po_type = e.target.value; refresh(); } }, [
+          { value: "ORDER_SPECIFIC", label: "Order Specific" }, { value: "BULK", label: "Bulk" }, { value: "CUSTOMER_SUPPLIED", label: "Customer Supplied" },
+        ], filters.po_type, "All types")),
+        field("Status", selectEl({ onchange: e => { filters.receipt_status = e.target.value; refresh(); } }, [
+          { value: "PENDING", label: "Pending" }, { value: "PARTIALLY_RECEIVED", label: "Partially Received" }, { value: "RECEIVED", label: "Received" },
+        ], filters.receipt_status, "All statuses")),
+      ]),
+    ]));
+  }
+
+  function renderTable() {
+    const wrap = document.getElementById("po-table-wrap");
+    wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Purchase Orders"), body]));
+    dataTable(body, {
+      columns: [
+        { label: "PO #", key: "po_number" },
+        { label: "Type", value: po => poTypeLabel(po.po_type), render: po => poTypeLabel(po.po_type) },
+        { label: "Vendor / Party", value: po => po.vendor_name || po.party_name || "", render: po => po.vendor_name || po.party_name || "—" },
+        { label: "Order", value: po => po.order_number || "", render: po => po.order_number || "—" },
+        { label: "Status", key: "receipt_status", render: po => badge(po.receipt_status) },
+        { label: "Date", key: "po_date" },
+        { label: "Actions", sortable: false, render: po => {
+            const actions = [el("button", { class: "secondary", type: "button", onclick: () => viewPO(po) }, "View")];
+            if (po.po_type !== "CUSTOMER_SUPPLIED" && po.receipt_status !== "RECEIVED") {
+              actions.push(el("button", { type: "button", onclick: () => openReceiveModal(po) }, "Receive"));
+            }
+            return el("div", { class: "form-inline" }, actions);
+          } },
+      ], rows: POS, pageSize: 12, initialSort: { key: "po_date", dir: "desc" },
+      searchPlaceholder: "Search purchase orders — number, vendor, order…",
+      emptyText: "No purchase orders yet — use one of the links above to create the first one.",
+    });
+  }
+
+  async function viewPO(po) {
+    const invoiceBox = el("div", { class: "muted" }, "Loading invoice info...");
+    const closeBtn = el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close");
+    showCrudModal(`📥 ${po.po_number}`, [
+      renderPOSummary(po),
+      el("div", { class: "section-title" }, "Invoice"),
+      invoiceBox,
+    ], [closeBtn], { wide: true });
+
+    try {
+      const invoices = await fetchAll(`/accounts/invoices/?purchase_order=${po.id}`);
+      invoiceBox.innerHTML = "";
+      if (!invoices.length) {
+        invoiceBox.appendChild(el("p", { class: "muted" },
+          po.po_type === "CUSTOMER_SUPPLIED" ? "No invoice (customer-supplied — no payment involved)." : "No invoice yet — generated automatically once receiving starts."));
+      } else {
+        invoices.forEach(inv => invoiceBox.appendChild(el("div", {},
+          `${inv.invoice_number} — subtotal ${fmtMoney(inv.subtotal)}, total ${fmtMoney(inv.total_amount)} (${inv.payment_status})`)));
+      }
+    } catch (e) { invoiceBox.textContent = "Could not load invoice: " + e.message; }
+  }
+
+  function openReceiveModal(po) {
+    const inputs = {};
+    const rows = po.items
+      .filter(it => Number(it.received_quantity) < Number(it.quantity))
+      .map(item => {
+        const remaining = Number(item.quantity) - Number(item.received_quantity);
+        const material = item.material_type === "FABRIC" ? `${item.fabric_type_name} / ${item.color_name}` : item.accessory_label;
+        const qtyInput = numberInput("", () => {}, { min: "0", max: String(remaining), step: "0.01", placeholder: `max ${remaining}` });
+        const rateInput = numberInput("", () => {}, { min: "0", step: "0.01", placeholder: "rate per unit" });
+        inputs[item.id] = { qtyInput, rateInput };
+        return el("div", { class: "subcard level-color" }, [
+          el("div", {}, `${material} — ${remaining} ${item.unit || ""} remaining`),
+          el("div", { class: "form-inline" }, [field("Qty Received", qtyInput), field("Rate", rateInput)]),
+        ]);
+      });
+
+    const errorBox = el("div", { class: "error-msg", style: "display:none;" });
+    const submit = async () => {
+      const items = [];
+      for (const [itemId, { qtyInput, rateInput }] of Object.entries(inputs)) {
+        const qty = qtyInput.value;
+        if (!qty || Number(qty) <= 0) continue;
+        if (!rateInput.value) { errorBox.textContent = "Enter a rate for every quantity you're receiving."; errorBox.style.display = "block"; return; }
+        items.push({ item_id: Number(itemId), received_quantity: Number(qty), rate: Number(rateInput.value) });
+      }
+      if (!items.length) { errorBox.textContent = "Enter at least one quantity to receive."; errorBox.style.display = "block"; return; }
+      try {
+        await apiPost(`/accounts/purchase-orders/${po.id}/receive/`, { items });
+        closeCrudModal();
+        await refresh();
+      } catch (e) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+    };
+    showCrudModal(`📥 Receive — ${po.po_number}`, [errorBox, ...rows], [
+      el("button", { type: "button", onclick: submit }, "Confirm Receipt"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ], { wide: true });
+  }
+
+  (async function init() {
+    renderFilters();
+    await refresh();
+  })();
+</script>
+{% endblock %}

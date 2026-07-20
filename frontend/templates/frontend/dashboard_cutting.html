@@ -1,0 +1,42 @@
+{% extends "frontend/base.html" %}
+{% block title %}Cutting - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Cutting Dashboard</h2>
+  <p class="page-subtitle">Overview of fabric receiving, cutting progress, and bundles sent to Production.</p>
+
+  <div class="grid grid-4" id="stat-cards"></div>
+
+  <div class="card">
+    <h3>Quick Links</h3>
+    <div class="form-inline">
+      <a class="btn secondary" href="/cutting/receive-fabric/">📥 Receive Fabric</a>
+      <a class="btn secondary" href="/cutting/record-cut/">✂️ Record Cut</a>
+      <a class="btn secondary" href="/cutting/bundles/">📦 Bundles</a>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["CUTTING_SUPERVISOR"]);
+  renderShell("cutting", "Cutting");
+
+  async function loadStats() {
+    const cards = document.getElementById("stat-cards");
+    const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
+      el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
+    ]);
+    try {
+      const orders = await fetchAll("/cutting/cutting-orders/");
+      const today = new Date().toISOString().slice(0, 10);
+      cards.appendChild(stat("Awaiting Receipt", orders.filter(c => c.status === "FABRIC_ISSUED").length, "warning"));
+      cards.appendChild(stat("In Cutting", orders.filter(c => c.status === "CUTTING").length, "warning"));
+      cards.appendChild(stat("Completed Today", orders.filter(c => c.status === "COMPLETED" && c.updated_at && c.updated_at.slice(0, 10) === today).length, "success"));
+      cards.appendChild(stat("Blocked (Don't Cut)", orders.filter(c => c.average_status === "DONT_CUT" && !c.average_override_approved).length, "danger"));
+      const totalWastage = orders.reduce((s, c) => s + Number(c.wastage_quantity || 0), 0);
+      cards.appendChild(stat("Total Wastage", totalWastage.toFixed(2)));
+    } catch (e) {}
+  }
+  loadStats();
+</script>
+{% endblock %}

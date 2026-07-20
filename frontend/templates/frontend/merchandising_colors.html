@@ -1,0 +1,36 @@
+{% extends "frontend/base.html" %}
+{% block title %}Colors - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Colors</h2>
+  <p class="page-subtitle">Leave hex code blank to auto-generate one from the name (recognized names like Navy or Maroon get their real color; anything else gets a consistent generated shade).</p>
+
+  <div id="panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["MERCHANDISE"]);
+  renderShell("merch-colors", "Colors");
+
+  crudPanel(document.getElementById("panel"), {
+    title: "Colors",
+    endpoint: "/master/colors/",
+    columns: [
+      {
+        render: c => el("span", { style: "display:flex;align-items:center;gap:0.5rem;" }, [
+          el("span", { class: "color-dot", style: `background:${c.hex_code || "#e5e9f0"};` }),
+          c.hex_code || "—",
+        ]),
+        label: "Swatch",
+      },
+      { key: "name", label: "Name" },
+      { render: c => badge(c.is_active ? "Active" : "Inactive"), label: "Status" },
+    ],
+    fields: [
+      { name: "name", label: "Color Name", required: true },
+      { name: "hex_code", label: "Hex Code (optional)" },
+    ],
+    editable: true,
+  });
+</script>
+{% endblock %}

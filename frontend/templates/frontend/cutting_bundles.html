@@ -1,0 +1,162 @@
+{% extends "frontend/base.html" %}
+{% block title %}Bundles - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Bundles</h2>
+  <p class="page-subtitle">Group recorded cut pieces into bundles, ready to send to Production.</p>
+
+  <div id="create-wrap"></div>
+  <div id="bundles-wrap"></div>
+  <div id="pieces-panel"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["CUTTING_SUPERVISOR"]);
+  renderShell("cutting-bundles", "Bundles");
+
+  let CUTTING_ORDERS = [];
+  const createState = { cutting_order: "", combo: "", quantity: "" };
+
+  /** Available-to-bundle quantity for one (color,size) combo -- mirrors the
+   *  backend's BundleSerializer.validate(): the minimum across every active
+   *  component's (cut - already bundled), or the plain cut-minus-bundled
+   *  figure when the product has no components. */
+  async function computeAvailability(cuttingOrder) {
+    const [pieces, bundles, components] = await Promise.all([
+      fetchAll(`/cutting/pieces/?cutting_order=${cuttingOrder.id}`),
+      fetchAll(`/cutting/bundles/?cutting_order=${cuttingOrder.id}`),
+      cuttingOrder.product ? fetchAll(`/master/product-components/?product=${cuttingOrder.product}&is_active=true`) : Promise.resolve([]),
+    ]);
+    const bySizeColor = new Map(); // "color:size" -> { color, size, colorSizeLabel, available }
+    const pieceKey = (p) => `${p.color}:${p.size}`;
+    const alreadyBundled = (color, size) => bundles.filter(b => b.color === color && b.size === size).reduce((s, b) => s + b.quantity, 0);
+
+    const combos = new Set(pieces.map(pieceKey));
+    combos.forEach(key => {
+      const [color, size] = key.split(":").map(Number);
+      const already = alreadyBundled(color, size);
+      let available;
+      if (components.length) {
+        available = Math.min(...components.map(comp => {
+          const p = pieces.find(pp => pp.color === color && pp.size === size && pp.component === comp.id);
+          return (p ? p.quantity : 0) - already;
+        }));
+      } else {
+        const p = pieces.find(pp => pp.color === color && pp.size === size && pp.component == null);
+        available = (p ? p.quantity : 0) - already;
+      }
+      const sample = pieces.find(pp => pp.color === color && pp.size === size);
+      const label = sample ? `${sample.color_name} / ${sample.size_name}` : `Color ${color} / Size ${size}`;
+      bySizeColor.set(key, { color, size, label, available: Math.max(available, 0) });
+    });
+    return bySizeColor;
+  }
+
+  async function renderCreateForm() {
+    const wrap = document.getElementById("create-wrap");
+    wrap.innerHTML = "";
+    const errorBox = el("div", { class: "error-msg", style: "display:none;" });
+
+    const orderSelect = selectEl({ onchange: async e => { createState.cutting_order = e.target.value; createState.combo = ""; await renderCreateForm(); } },
+      CUTTING_ORDERS.map(c => ({ value: c.id, label: `${c.cutting_number} — ${c.fabric_type_name}/${c.color_name}` })), createState.cutting_order, "Select cutting order");
+
+    let comboField = null, availabilityHint = null;
+    const cuttingOrder = CUTTING_ORDERS.find(c => String(c.id) === String(createState.cutting_order));
+    if (cuttingOrder) {
+      const availability = await computeAvailability(cuttingOrder);
+      const options = [...availability.values()].map(a => ({ value: `${a.color}:${a.size}`, label: `${a.label} — available: ${a.available}` }));
+      comboField = field("Color / Size", selectEl({ onchange: e => { createState.combo = e.target.value; renderCreateForm(); } }, options, createState.combo, "Select color/size"));
+      const chosen = availability.get(createState.combo);
+      if (chosen) availabilityHint = el("p", { class: "muted" }, `Available to bundle: ${chosen.available}`);
+    }
+
+    const qtyField = field("Quantity", numberInput(createState.quantity, v => createState.quantity = v, { min: "1", step: "1" }));
+    const submitBtn = el("button", { type: "button", onclick: submitBundle }, "Create Bundle");
+
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "Create Bundle"),
+      errorBox,
+      el("div", { class: "form-inline" }, [field("Cutting Order", orderSelect), comboField, qtyField].filter(Boolean)),
+      availabilityHint,
+      el("div", { class: "form-inline", style: "margin-top:0.5rem;" }, [submitBtn]),
+    ]));
+    wrap._errorBox = errorBox;
+  }
+
+  async function submitBundle() {
+    const errorBox = document.getElementById("create-wrap")._errorBox;
+    errorBox.style.display = "none";
+    if (!createState.cutting_order || !createState.combo || !createState.quantity) {
+      errorBox.textContent = "Select a cutting order, color/size, and quantity."; errorBox.style.display = "block"; return;
+    }
+    const [color, size] = createState.combo.split(":").map(Number);
+    try {
+      await apiPost("/cutting/bundles/", { cutting_order: Number(createState.cutting_order), color, size, quantity: Number(createState.quantity) });
+      createState.quantity = "";
+      await refreshBundles();
+      await renderCreateForm();
+    } catch (e) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+  }
+
+  async function sendToProduction(bundle) {
+    try {
+      await apiPost(`/cutting/bundles/${bundle.id}/send_to_production/`, {});
+      await refreshBundles();
+    } catch (e) { alert("Error: " + e.message); }
+  }
+
+  async function refreshBundles() {
+    const wrap = document.getElementById("bundles-wrap");
+    wrap.innerHTML = "Loading...";
+    try {
+      const bundles = await fetchAll("/cutting/bundles/");
+      wrap.innerHTML = "";
+      const body = el("div", {});
+      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Bundles (grouped pieces, ready for Production)"), body]));
+      dataTable(body, {
+        columns: [
+          { label: "Bundle #", key: "bundle_number" },
+          { label: "Cutting # (roll)", value: b => b.cutting_number || "", render: b => b.cutting_number || "—" },
+          { label: "Order", value: b => b.order_number || "", render: b => b.order_number || "—" },
+          { label: "Color", key: "color_name" }, { label: "Size", key: "size_name" },
+          { label: "Qty", key: "quantity", value: b => Number(b.quantity) },
+          { label: "Status", key: "status", render: b => badge(b.status) },
+          { label: "Sent to Production", value: b => (b.sent_to_production_at || ""), render: b => b.sent_to_production_at
+              ? el("span", {}, [badge("Sent"), " ", b.sent_to_production_at.slice(0, 16).replace("T", " ")]) : badge("Not Sent") },
+          { label: "", sortable: false, render: b => b.sent_to_production_at ? "—"
+              : el("button", { type: "button", onclick: () => sendToProduction(b) }, "Send to Production") },
+        ], rows: bundles, pageSize: 12, searchPlaceholder: "Search bundles — number, order, color, size…",
+        emptyText: "No bundles yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  (async function init() {
+    CUTTING_ORDERS = await fetchAll("/cutting/cutting-orders/?status=COMPLETED");
+    await renderCreateForm();
+    await refreshBundles();
+
+    const allCuttingOrders = await fetchAll("/cutting/cutting-orders/");
+    const cuttingOrderNumber = id => (allCuttingOrders.find(c => c.id === id) || {}).cutting_number || id;
+
+    crudPanel(document.getElementById("pieces-panel"), {
+      title: "Cutting Pieces (by color, size & component)",
+      endpoint: "/cutting/pieces/",
+      columns: [
+        { render: p => cuttingOrderNumber(p.cutting_order), label: "Cutting Order" },
+        { key: "color_name", label: "Color" },
+        { key: "size_name", label: "Size" },
+        { key: "component_name", label: "Component" },
+        { key: "quantity", label: "Qty" },
+      ],
+      fields: [
+        { name: "cutting_order", label: "Cutting Order", type: "select", optionsEndpoint: "/cutting/cutting-orders/", optionsLabel: "cutting_number", required: true },
+        { name: "color", label: "Color", type: "select", optionsEndpoint: "/master/colors/", optionsLabel: "name", required: true },
+        { name: "size", label: "Size", type: "select", optionsEndpoint: "/master/sizes/", optionsLabel: "name", required: true },
+        { name: "component", label: "Component (optional)", type: "select", optionsEndpoint: "/master/product-components/", optionsLabel: "name" },
+        { name: "quantity", label: "Quantity", type: "number", required: true },
+      ],
+    });
+  })();
+</script>
+{% endblock %}

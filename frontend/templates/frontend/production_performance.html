@@ -1,0 +1,140 @@
+{% extends "frontend/base.html" %}
+{% block title %}Performance & Income - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Performance & Income</h2>
+  <p class="page-subtitle">Per-operator production performance, and income calculation/payouts.</p>
+
+  <div class="card">
+    <h3>Operator Report</h3>
+    <div class="form-inline">
+      <div class="form-row"><label>Operator</label><select id="report-operator"></select></div>
+      <button type="button" onclick="loadReport()">Load Report</button>
+    </div>
+    <div id="report-wrap" style="margin-top:1rem;"></div>
+    <div id="trend-wrap" style="margin-top:1rem;"></div>
+  </div>
+
+  <div class="card">
+    <h3>Calculate Operator Income</h3>
+    <div class="form-inline">
+      <div class="form-row"><label>Operator</label><select id="income-operator"></select></div>
+      <div class="form-row"><label>Period Start</label><input type="date" id="income-start" class="allow-past"></div>
+      <div class="form-row"><label>Period End</label><input type="date" id="income-end" class="allow-past"></div>
+      <button type="button" onclick="calculateIncome()">Calculate</button>
+    </div>
+    <div id="income-result" style="margin-top:1rem;"></div>
+  </div>
+
+  <div id="income-table-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["PRODUCTION_SUPERVISOR"]);
+  renderShell("production-performance", "Performance & Income");
+
+  loadOptions(document.getElementById("report-operator"), "/operators/operators/", "name");
+  loadOptions(document.getElementById("income-operator"), "/operators/operators/", "name");
+
+  async function loadReport() {
+    const operatorId = document.getElementById("report-operator").value;
+    const wrap = document.getElementById("report-wrap");
+    const trendWrap = document.getElementById("trend-wrap");
+    if (!operatorId) return;
+    wrap.innerHTML = "Loading..."; trendWrap.innerHTML = "";
+    try {
+      const [r, trends] = await Promise.all([
+        apiGet(`/operators/operators/${operatorId}/report/`),
+        apiGet(`/operators/operators/${operatorId}/trends/`),
+      ]);
+      wrap.innerHTML = "";
+      wrap.appendChild(detailGrid([
+        ["Total Assignments", String(r.production.total_assignments)],
+        ["Completed Bundles", String(r.production.completed_bundles)],
+        ["Pieces Issued", String(r.production.pieces_issued)],
+        ["Pieces Returned", String(r.production.pieces_returned)],
+        ["Pieces Lost", String(r.production.pieces_lost)],
+        ["Pieces Excused", String(r.production.pieces_excused)],
+        ["Total Defects", String(r.production.total_defects)],
+        ["Quality Pass Rate", r.production.quality_pass_rate != null ? `${r.production.quality_pass_rate}%` : "—"],
+        ["Efficiency %", r.production.efficiency_pct != null ? `${r.production.efficiency_pct}%` : "—"],
+        ["Quality Rate %", r.production.quality_rate_pct != null ? `${r.production.quality_rate_pct}%` : "—"],
+        ["Total Income", fmtMoney(r.earnings.total_income)],
+        ["Pending Amount", fmtMoney(r.earnings.pending_amount)],
+        ["Paid Amount", fmtMoney(r.earnings.paid_amount)],
+      ]));
+      trendWrap.innerHTML = "";
+      const trendRows = (trends || []).map(t => ({ ...t, week_label: (t.week || "").slice(0, 10) }));
+      trendWrap.appendChild(el("div", { class: "card" }, [
+        el("h4", {}, "Pieces Completed -- Last 8 Weeks"),
+        renderTrendBars(trendRows, "week_label", "pieces_completed"),
+      ]));
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  async function calculateIncome() {
+    const operator = document.getElementById("income-operator").value;
+    const period_start = document.getElementById("income-start").value;
+    const period_end = document.getElementById("income-end").value;
+    if (!operator || !period_start || !period_end) return alert("Fill all fields.");
+    try {
+      const income = await apiPost("/operators/income/calculate/", { operator: Number(operator), period_start, period_end });
+      const wrap = document.getElementById("income-result");
+      wrap.innerHTML = "";
+      wrap.appendChild(detailGrid([
+        ["Bundles Completed", String(income.bundles_completed)],
+        ["Pieces Completed", String(income.pieces_completed)],
+        ["Total Income", fmtMoney(income.total_income)],
+        ["Status", badge(income.payment_status)],
+      ]));
+      await refreshIncomeTable();
+    } catch (e) { alert("Error: " + e.message); }
+  }
+
+  async function payFull(id) {
+    try { await apiPost(`/operators/income/${id}/mark_paid/`, {}); await refreshIncomeTable(); }
+    catch (e) { alert("Error: " + e.message); }
+  }
+
+  async function payPartial(id, remaining) {
+    const raw = prompt(`Enter amount to pay (remaining: ${remaining}):`);
+    if (raw === null) return;
+    const amount = Number(raw);
+    if (!amount || amount <= 0) return alert("Enter a valid amount.");
+    try { await apiPost(`/operators/income/${id}/mark_paid/`, { amount }); await refreshIncomeTable(); }
+    catch (e) { alert("Error: " + e.message); }
+  }
+
+  async function refreshIncomeTable() {
+    const wrap = document.getElementById("income-table-wrap");
+    wrap.innerHTML = "Loading...";
+    try {
+      const incomes = await fetchAll("/operators/income/");
+      wrap.innerHTML = "";
+      const body = el("div", {});
+      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Income Records"), body]));
+      dataTable(body, {
+        columns: [
+          { label: "Operator", key: "operator_name" },
+          { label: "Period", value: i => i.period_end, render: i => `${i.period_start} — ${i.period_end}` },
+          { label: "Bundles", key: "bundles_completed", value: i => Number(i.bundles_completed) },
+          { label: "Pieces", key: "pieces_completed", value: i => Number(i.pieces_completed) },
+          { label: "Amount", value: i => Number(i.total_income), render: i => fmtMoney(i.total_income) },
+          { label: "Paid", value: i => Number(i.paid_amount || 0), render: i => fmtMoney(i.paid_amount || 0) },
+          { label: "Status", key: "payment_status", render: i => badge(i.payment_status) },
+          { label: "", sortable: false, render: i => {
+              const remaining = (Number(i.total_income) - Number(i.paid_amount || 0)).toFixed(2);
+              return i.payment_status === "PAID" ? "—" : el("div", { class: "form-inline", style: "gap:0.4rem;" }, [
+                el("button", { class: "secondary", type: "button", onclick: () => payPartial(i.id, remaining) }, "Pay Partial"),
+                el("button", { type: "button", onclick: () => payFull(i.id) }, "Pay Full"),
+              ]);
+            } },
+        ], rows: incomes, pageSize: 12, initialSort: { key: "operator_name", dir: "asc" },
+        searchPlaceholder: "Search income — operator, status…", emptyText: "No income records yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  refreshIncomeTable();
+</script>
+{% endblock %}

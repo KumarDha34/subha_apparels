@@ -1,0 +1,134 @@
+{% extends "frontend/base.html" %}
+{% block title %}Issue Fabric - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Issue Fabric to Cutting</h2>
+  <p class="page-subtitle">Issue received fabric to Cutting for a specific order. (Accessories are now issued to Production by the Cutting department, on the Cutting ▸ Issue Accessories page.)</p>
+
+  <div id="fabric-card"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-issue-materials", "Issue Fabric");
+
+  const ELIGIBLE_ORDER_STATUSES = ["CONFIRMED", "IN_CUTTING", "IN_PRODUCTION", "IN_FINISHING"];
+
+  let MASTER = { orders: [], rolls: [] };
+  let fabricState = blankFabricIssue();
+  let fabricErrors = [];
+  let fabricIssues = [];
+
+  function blankFabricIssue() {
+    return { order: "", cutting_date: new Date().toISOString().slice(0, 10), remarks: "", rows: [{ fabric_issued: "", quantity: "" }] };
+  }
+
+  function fabricRollLabel(r) {
+    return `${r.fabric_type_name} / ${r.color_name} — ${r.roll_number || "Roll #" + r.id} (${r.available_quantity} ${r.unit} available)` +
+      (r.supplied_by_party_name ? ` · Customer Supplied: ${r.supplied_by_party_name}` : (r.vendor_name ? ` · Vendor: ${r.vendor_name}` : ""));
+  }
+  const orderLabel = o => `${o.order_number} — ${o.party_name}`;
+
+  async function loadMasterData() {
+    const [orders, rolls] = await Promise.all([
+      fetchAll("/orders/"),
+      fetchAll("/store/fabric-stock/?is_active=true"),
+    ]);
+    MASTER = {
+      orders: orders.filter(o => ELIGIBLE_ORDER_STATUSES.includes(o.status)),
+      rolls: rolls.filter(r => Number(r.available_quantity) > 0),
+    };
+  }
+
+  function renderFabricCard() {
+    const root = document.getElementById("fabric-card");
+    root.innerHTML = "";
+
+    let body;
+    if (!MASTER.orders.length) {
+      body = el("p", { class: "muted" }, "No confirmed orders yet — ask Merchandising to confirm an order before issuing fabric.");
+    } else if (!MASTER.rolls.length) {
+      body = el("p", { class: "muted" }, "No fabric stock available to issue — receive fabric via Purchase Orders first.");
+    } else {
+      const header = el("div", { class: "form-inline" }, [
+        field("Order", selectEl({ onchange: e => { fabricState.order = e.target.value; } },
+          MASTER.orders.map(o => ({ value: o.id, label: orderLabel(o) })), fabricState.order, "Select order")),
+        field("Cutting Date", el("input", { type: "date", value: fabricState.cutting_date, oninput: e => fabricState.cutting_date = e.target.value })),
+      ]);
+      const rollRows = fabricState.rows.map((r, i) => el("div", { class: "form-inline", style: "align-items:flex-end;" }, [
+        field(`Roll #${i + 1}`, selectEl({ onchange: e => { r.fabric_issued = e.target.value; } },
+          MASTER.rolls.map(x => ({ value: x.id, label: fabricRollLabel(x) })), r.fabric_issued, "Select roll")),
+        field("Quantity", numberInput(r.quantity, v => r.quantity = v, { min: "0", step: "0.01" })),
+        removeIconBtn("Remove roll", fabricState.rows.length <= 1, () => { fabricState.rows.splice(i, 1); renderFabricCard(); }),
+      ]));
+      const addRow = el("button", { class: "secondary", type: "button", onclick: () => { fabricState.rows.push({ fabric_issued: "", quantity: "" }); renderFabricCard(); } }, "+ Add Roll");
+      const remarks = field("Remarks", el("textarea", { oninput: e => fabricState.remarks = e.target.value }, fabricState.remarks || ""));
+      const saveBtn = el("button", { type: "button", onclick: issueFabric }, "Issue All Rolls to Cutting");
+      body = el("div", {}, [
+        fabricErrors.length ? el("div", { class: "error-msg" }, fabricErrors.join(" ")) : null,
+        header,
+        el("p", { class: "muted", style: "margin:0.3rem 0;" }, "Issue several rolls for the same order at once — one per colour / roll. Each becomes its own cutting order (roll stays identifiable)."),
+        ...rollRows, el("div", { class: "form-inline" }, [addRow]), remarks,
+        el("div", { class: "form-inline", style: "margin-top:0.75rem;" }, [saveBtn]),
+      ]);
+    }
+
+    root.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "🧵 Issue Fabric to Cutting"),
+      body,
+      el("div", { class: "section-title" }, "Recent Fabric Issues"),
+      renderFabricIssuesTable(),
+    ]));
+  }
+
+  function renderFabricIssuesTable() {
+    if (!fabricIssues.length) return el("p", { class: "muted" }, "No fabric issued yet.");
+    const table = el("table");
+    table.appendChild(el("thead", {}, el("tr", {}, ["Cutting #", "Order", "Quantity", "Wastage", "Status", "Date"].map(h => el("th", {}, h)))));
+    const tbody = el("tbody");
+    fabricIssues.forEach(c => tbody.appendChild(el("tr", {}, [
+      el("td", {}, c.cutting_number), el("td", {}, c.order_number),
+      el("td", {}, String(c.fabric_issued_quantity)), el("td", {}, String(c.wastage_quantity)),
+      el("td", {}, badge(c.status)), el("td", {}, c.cutting_date || "—"),
+    ])));
+    table.appendChild(tbody);
+    return table;
+  }
+
+  async function issueFabric() {
+    const errs = [];
+    if (!fabricState.order) errs.push("Select an order.");
+    const validRows = fabricState.rows.filter(r => r.fabric_issued && r.quantity && Number(r.quantity) > 0);
+    if (!validRows.length) errs.push("Add at least one roll with a quantity greater than 0.");
+    fabricErrors = [...new Set(errs)];
+    if (fabricErrors.length) { renderFabricCard(); return; }
+
+    let ok = 0, failed = [];
+    for (const r of validRows) {
+      try {
+        await apiPost("/cutting/cutting-orders/", {
+          order: Number(fabricState.order), fabric_issued: Number(r.fabric_issued),
+          fabric_issued_quantity: Number(r.quantity),
+          cutting_date: fabricState.cutting_date || null, remarks: fabricState.remarks || "",
+        });
+        ok++;
+      } catch (e) { failed.push(e.message); }
+    }
+    if (ok) notify.success(`${ok} roll(s) issued to Cutting.`);
+    if (failed.length) { fabricErrors = [`${failed.length} roll(s) failed: ${failed[0]}`]; }
+    else { fabricState = blankFabricIssue(); }
+    await loadMasterData();
+    await refreshFabricIssues();
+  }
+
+  async function refreshFabricIssues() {
+    fabricIssues = await fetchAll("/cutting/cutting-orders/");
+    renderFabricCard();
+  }
+
+  (async function init() {
+    await loadMasterData();
+    await refreshFabricIssues();
+  })();
+</script>
+{% endblock %}

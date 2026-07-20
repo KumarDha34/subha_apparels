@@ -1,0 +1,110 @@
+{% extends "frontend/base.html" %}
+{% block title %}Send to Process - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Send to Process</h2>
+  <p class="page-subtitle">Send completed pieces to a processing department — Finishing, Washing, Printing or Embroidery. Pick an order to see its details and what's already been sent, then choose a department and quantity.</p>
+
+  <div id="send-wrap"></div>
+  <p class="muted" style="margin-top:0.4rem;">Track and receive back everything on <a href="/production/processing/">Production ▸ Processing</a>.</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["PRODUCTION_SUPERVISOR", "FINISHING_SUPERVISOR"]);
+  renderShell("production-send-to-finishing", "Send to Process");
+
+  const DEPARTMENTS = ["FINISHING", "WASHING", "PRINTING", "EMBROIDERY"];
+  const deptLabel = d => d[0] + d.slice(1).toLowerCase();
+  let MASTER = { orders: [], vendors: [] };
+  let state = blankSend();
+  let summary = null;
+  function blankSend() {
+    return { order: "", department: "", quantity_sent: "", is_outsourced: false, vendor: "", cost: "", sent_date: new Date().toISOString().slice(0, 10), remarks: "" };
+  }
+
+  async function loadMaster() {
+    const [orders, vendors] = await Promise.all([fetchAll("/orders/"), fetchAll("/master/vendors/?is_active=true")]);
+    MASTER = { orders: orders.filter(o => ["IN_PRODUCTION", "IN_FINISHING"].includes(o.status)), vendors };
+  }
+
+  async function onOrderChange(id) {
+    state.order = id; summary = null;
+    if (id) {
+      try {
+        summary = await apiGet(`/production/process-dispatches/order_summary/?order=${id}`);
+        if (!state.quantity_sent) state.quantity_sent = summary.accepted_pieces;
+      } catch (e) { notify.error(e.message); }
+    }
+    renderForm();
+  }
+
+  function detailsPanel() {
+    if (!state.order) return el("p", { class: "muted" }, "Select an order to see its details and processing history.");
+    if (!summary) return el("p", { class: "muted" }, "Loading order details…");
+    const sentRows = DEPARTMENTS.map(d => {
+      const e = summary.by_department[d] || { sent: 0, received: 0 };
+      return el("tr", {}, [el("td", { class: "cut-size" }, deptLabel(d)), el("td", {}, String(e.sent)), el("td", {}, String(e.received)), el("td", {}, String(e.sent - (e.received || 0)))]);
+    });
+    const table = el("table", { class: "cut-sheet" });
+    table.appendChild(el("thead", {}, el("tr", {}, ["Department", "Sent", "Received", "Out"].map(h => el("th", {}, h)))));
+    table.appendChild(el("tbody", {}, sentRows));
+    return el("div", { class: "subcard level-item" }, [
+      detailGrid([
+        ["Order", summary.order_number], ["Company", summary.party_name],
+        ["Type", summary.order_type ? summary.order_type.replace("_", " ") : "—"],
+        ["Accepted from Production", `${summary.accepted_pieces} pcs`],
+      ]),
+      el("div", { class: "muted", style: "margin:0.2rem 0;" }, "Products: " + (summary.items.map(i => `${i.product} (${i.fabric})`).join(" · ") || "—")),
+      el("div", { class: "section-title" }, "Already sent to processes"),
+      el("div", { class: "cut-sheet-wrap" }, table),
+    ]);
+  }
+
+  function renderForm() {
+    const wrap = document.getElementById("send-wrap");
+    wrap.innerHTML = "";
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const orderRow = el("div", { class: "form-inline" }, [
+      field("Order", selectEl({ onchange: e => onOrderChange(e.target.value) }, MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "Select order")),
+    ]);
+    const form = el("div", { class: "form-inline" }, [
+      field("Department", selectEl({ onchange: e => { state.department = e.target.value; } }, DEPARTMENTS.map(d => ({ value: d, label: deptLabel(d) })), state.department, "Select department")),
+      field("Quantity", numberInput(state.quantity_sent, v => state.quantity_sent = v, { min: "1", step: "1" })),
+      field("Sent Date", el("input", { type: "date", value: state.sent_date, oninput: e => state.sent_date = e.target.value })),
+      field("Outsourced?", el("label", {}, [el("input", { type: "checkbox", ...(state.is_outsourced ? { checked: "checked" } : {}), onchange: e => { state.is_outsourced = e.target.checked; renderForm(); } }), " Yes"])),
+    ]);
+    const outsourceRow = state.is_outsourced ? el("div", { class: "form-inline" }, [
+      field("Vendor", selectEl({ onchange: e => state.vendor = e.target.value }, MASTER.vendors.map(v => ({ value: v.id, label: v.company_name })), state.vendor, "Select vendor")),
+      field("Cost (Rs.)", numberInput(state.cost, v => state.cost = v, { min: "0", step: "0.01" })),
+    ]) : null;
+    const remarks = field("Remarks", el("input", { type: "text", value: state.remarks, oninput: e => state.remarks = e.target.value }));
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "Send Pieces to a Department"),
+      err, orderRow, detailsPanel(), form, outsourceRow, remarks,
+      el("div", { class: "form-inline", style: "margin-top:0.7rem;" }, [el("button", { type: "button", onclick: submitSend }, "Send")]),
+    ]));
+    wrap._err = err;
+  }
+
+  async function submitSend() {
+    const err = document.getElementById("send-wrap")._err; err.style.display = "none";
+    if (!state.order || !state.department || !state.quantity_sent || Number(state.quantity_sent) <= 0) {
+      err.textContent = "Select an order, department and quantity."; err.style.display = "block"; return;
+    }
+    try {
+      const body = { order: Number(state.order), department: state.department, quantity_sent: Number(state.quantity_sent), sent_date: state.sent_date || null, is_outsourced: !!state.is_outsourced, remarks: state.remarks || "" };
+      if (state.is_outsourced && state.vendor) body.vendor = Number(state.vendor);
+      if (state.is_outsourced && state.cost) body.cost = Number(state.cost);
+      await apiPost("/production/process-dispatches/", body);
+      notify.success(`Sent to ${deptLabel(state.department)}.`);
+      const keepOrder = state.order;
+      state = blankSend();
+      await loadMaster(); await onOrderChange(keepOrder);
+    } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+  }
+
+  (async function init() {
+    await loadMaster(); renderForm();
+  })();
+</script>
+{% endblock %}

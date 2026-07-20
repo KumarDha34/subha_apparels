@@ -1,0 +1,84 @@
+{% extends "frontend/base.html" %}
+{% block title %}Store - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Store Dashboard</h2>
+  <p class="page-subtitle">Overview of fabric and accessory stock, purchasing, and reorder alerts.</p>
+
+  <div class="grid grid-4" id="stat-cards"></div>
+
+  <div class="card">
+    <h3>Recent Stock Activity</h3>
+    <div id="recent-activity" class="muted">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h3>Quick Links</h3>
+    <div class="form-inline">
+      <a class="btn" href="/store/stock/">Stock</a>
+      <a class="btn secondary" href="/store/purchases/">Purchase Orders</a>
+      <a class="btn secondary" href="/store/vendors/">Vendors</a>
+      <a class="btn secondary" href="/store/accessories/">Accessories</a>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store", "Store");
+
+  function statCard(label, value, kind) {
+    return el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
+      el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
+    ]);
+  }
+
+  async function loadOverview() {
+    const cards = document.getElementById("stat-cards");
+    try {
+      const stock = await apiGet("/store/fabric-stock/");
+      cards.appendChild(statCard("Fabric Stock Items", stock.count ?? (stock.results || stock).length));
+    } catch (e) {}
+    try {
+      const low = await apiGet("/store/fabric-stock/low_stock/");
+      cards.appendChild(statCard("Low Fabric Stock", low.length, low.length ? "warning" : "success"));
+    } catch (e) {}
+    try {
+      const accStock = await apiGet("/store/accessory-stock/");
+      cards.appendChild(statCard("Accessory Stock Items", accStock.count ?? (accStock.results || accStock).length));
+    } catch (e) {}
+    try {
+      const pos = await apiGet("/accounts/purchase-orders/?receipt_status=PENDING");
+      cards.appendChild(statCard("Pending Purchase Orders", pos.count ?? (pos.results || pos).length, "warning"));
+    } catch (e) {}
+
+    try {
+      const [fabricTxns, accTxns] = await Promise.all([
+        fetchAll("/store/transactions/"),
+        fetchAll("/store/accessory-transactions/"),
+      ]);
+      const combined = [
+        ...fabricTxns.map(t => ({ ...t, kind: "🧵" })),
+        ...accTxns.map(t => ({ ...t, kind: "🧷" })),
+      ].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")).slice(0, 8);
+
+      const box = document.getElementById("recent-activity");
+      box.innerHTML = "";
+      if (!combined.length) {
+        box.appendChild(el("p", { class: "muted" }, "No stock activity yet."));
+      } else {
+        const table = el("table");
+        table.appendChild(el("thead", {}, el("tr", {}, ["", "Type", "Qty", "Reference", "Date", "By"].map(h => el("th", {}, h)))));
+        const tbody = el("tbody");
+        combined.forEach(t => tbody.appendChild(el("tr", {}, [
+          el("td", {}, t.kind), el("td", {}, badge(t.transaction_type)), el("td", {}, String(t.quantity)),
+          el("td", {}, t.reference || "—"), el("td", {}, t.transaction_date), el("td", {}, t.created_by_name || "—"),
+        ])));
+        table.appendChild(tbody);
+        box.appendChild(table);
+      }
+    } catch (e) { document.getElementById("recent-activity").textContent = "Unavailable."; }
+  }
+  loadOverview();
+</script>
+{% endblock %}

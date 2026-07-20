@@ -1,0 +1,102 @@
+{% extends "frontend/base.html" %}
+{% block title %}Production - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Production Dashboard</h2>
+  <p class="page-subtitle">A complete overview — bundles, operators, output & efficiency, quality, processing and payouts.</p>
+
+  <div class="grid grid-4" id="stat-cards"></div>
+
+  <div class="grid grid-2">
+    <div class="card"><h3>Assignment status</h3><div id="status-breakdown" class="muted">Loading…</div></div>
+    <div class="card"><h3>Out for processing (not yet back)</h3><div id="processing-out" class="muted">Loading…</div></div>
+  </div>
+
+  <div class="card"><h3>Operator output</h3><div id="operator-output" class="muted">Loading…</div></div>
+
+  <div class="card">
+    <h3>Quick Links</h3>
+    <div class="form-inline">
+      <a class="btn secondary" href="/production/accessories/">🧷 Accessories Received</a>
+      <a class="btn secondary" href="/production/receive-bundles/">📥 Receive Bundles</a>
+      <a class="btn secondary" href="/production/bundle-allocation/">🧑‍🏭 Bundle Allocation</a>
+      <a class="btn secondary" href="/production/operators/">👥 Operators</a>
+      <a class="btn secondary" href="/production/performance/">📈 Performance & Income</a>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["PRODUCTION_SUPERVISOR"]);
+  renderShell("production", "Production");
+
+  const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
+    el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
+  ]);
+
+  async function loadStats() {
+    const cards = document.getElementById("stat-cards");
+    let assignments = [], bundlesAwaiting = [], operators = [], dispatches = [], pendingIncome = [];
+    try { assignments = await fetchAll("/operators/assignments/"); } catch (e) {}
+    try { bundlesAwaiting = await fetchAll("/cutting/bundles/?status=CREATED&sent_to_production_at__isnull=False"); } catch (e) {}
+    try { operators = await fetchAll("/operators/operators/?is_active=true"); } catch (e) {}
+    try { dispatches = await fetchAll("/production/process-dispatches/"); } catch (e) {}
+    try { pendingIncome = await fetchAll("/operators/income/?payment_status=PENDING"); } catch (e) {}
+
+    const DONE = a => a.status === "COMPLETED" || a.status === "QUALITY_CHECKED";
+    const issued = assignments.reduce((s, a) => s + (Number(a.issued_quantity) || 0), 0);
+    const returned = assignments.reduce((s, a) => s + (Number(a.returned_quantity) || 0), 0);
+    const defects = assignments.reduce((s, a) => s + (Number(a.defects) || 0), 0);
+    const produced = assignments.filter(DONE).reduce((s, a) => s + (Number(a.returned_quantity) || 0), 0);
+    const eff = issued ? Math.round(((returned - defects) / issued) * 1000) / 10 : null;
+    const inProgress = assignments.filter(a => a.status === "IN_PROGRESS").length;
+    const pendingShortage = assignments.filter(a => a.shortage_reason_status === "PENDING_REVIEW").length;
+    const out = dispatches.filter(d => d.status === "SENT");
+    const outPieces = out.reduce((s, d) => s + (Number(d.quantity_sent) || 0), 0);
+
+    cards.appendChild(stat("Bundles Awaiting Receipt", bundlesAwaiting.length, bundlesAwaiting.length ? "warning" : "success"));
+    cards.appendChild(stat("Active Operators", operators.length));
+    cards.appendChild(stat("Assignments In Progress", inProgress));
+    cards.appendChild(stat("Pieces Produced", produced.toLocaleString(), "success"));
+    cards.appendChild(stat("Efficiency", eff != null ? eff + "%" : "—"));
+    cards.appendChild(stat("Total Defects", defects, defects ? "warning" : "success"));
+    cards.appendChild(stat("Pending Shortage Reviews", pendingShortage, pendingShortage ? "danger" : "success"));
+    cards.appendChild(stat("Out for Processing", outPieces.toLocaleString() + " pcs"));
+    cards.appendChild(stat("Pending Payouts", pendingIncome.length, pendingIncome.length ? "danger" : "success"));
+
+    // Assignment status breakdown
+    const sb = document.getElementById("status-breakdown"); sb.innerHTML = "";
+    const counts = {};
+    assignments.forEach(a => { counts[a.status] = (counts[a.status] || 0) + 1; });
+    const rows = Object.entries(counts).map(([s, c]) => ({ status: s, count: c }));
+    if (rows.length) dataTable(sb, { columns: [{ label: "Status", key: "status", render: r => badge(r.status) }, { label: "Assignments", key: "count", value: r => r.count }], rows, pageSize: 8, searchable: false });
+    else sb.textContent = "No assignments yet.";
+
+    // Out for processing
+    const po = document.getElementById("processing-out"); po.innerHTML = "";
+    if (out.length) dataTable(po, { columns: [
+        { label: "Dispatch #", key: "dispatch_number" }, { label: "Order", key: "order_number" },
+        { label: "Department", key: "department_display" }, { label: "Sent", key: "quantity_sent", value: r => Number(r.quantity_sent) },
+        { label: "Sent Date", key: "sent_date", render: r => r.sent_date || "—" },
+      ], rows: out, pageSize: 6, searchable: out.length > 6 });
+    else po.textContent = "Nothing out for processing right now.";
+
+    // Operator output (group accepted assignments by operator)
+    const oo = document.getElementById("operator-output"); oo.innerHTML = "";
+    const opMap = new Map();
+    assignments.forEach(a => {
+      const g = opMap.get(a.operator_name) || { operator: a.operator_name, bundles: 0, issued: 0, returned: 0, defects: 0 };
+      g.bundles += 1; g.issued += Number(a.issued_quantity) || 0; g.returned += Number(a.returned_quantity) || 0; g.defects += Number(a.defects) || 0;
+      opMap.set(a.operator_name, g);
+    });
+    const opRows = [...opMap.values()].map(g => ({ ...g, efficiency: g.issued ? Math.round(((g.returned - g.defects) / g.issued) * 1000) / 10 : 0 }));
+    if (opRows.length) dataTable(oo, { columns: [
+        { label: "Operator", key: "operator" }, { label: "Bundles", key: "bundles", value: r => r.bundles },
+        { label: "Issued", key: "issued", value: r => r.issued }, { label: "Returned", key: "returned", value: r => r.returned },
+        { label: "Defects", key: "defects", value: r => r.defects }, { label: "Efficiency", value: r => r.efficiency, render: r => r.efficiency + "%" },
+      ], rows: opRows, pageSize: 8, initialSort: { key: "returned", dir: "desc" }, searchPlaceholder: "Search operators…" });
+    else oo.textContent = "No operator activity yet.";
+  }
+  loadStats();
+</script>
+{% endblock %}
