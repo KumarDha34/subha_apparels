@@ -357,6 +357,11 @@ class CuttingOrderViewSet(viewsets.ModelViewSet):
                 b.status = Bundle.Status.RECEIVED
                 b.save(update_fields=["sent_to_production_at", "sent_by", "status", "updated_at"])
                 BundleReceipt.objects.get_or_create(bundle=b, defaults={"received_by": request.user})
+            # Bundles reaching the floor is the real start of production -- move
+            # the order to IN_PRODUCTION so it shows up on Send to Process (even
+            # from just the first of several cutting orders; sending is partial).
+            if co.order_id:
+                co.order.advance_status(Order.Status.IN_PRODUCTION)
 
         count = len(bundles)
         notify_role(
