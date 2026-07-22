@@ -37,8 +37,39 @@ class CuttingOrderSerializer(serializers.ModelSerializer):
     quantity_display = serializers.SerializerMethodField()
     bundle_count = serializers.SerializerMethodField()
     unsent_bundle_count = serializers.SerializerMethodField()
+    fabric_unit = serializers.SerializerMethodField()
+    fabric_unit_display = serializers.SerializerMethodField()
 
     half_roll = serializers.SerializerMethodField()
+
+    def get_fabric_unit(self, obj):
+        """Get the actual unit from the fabric stock"""
+        if obj.fabric_issued:
+            unit = obj.fabric_issued.unit
+            if unit:
+                # Convert to lowercase abbreviation
+                unit_map = {
+                    "METERS": "m",
+                    "YARDS": "yd",
+                    "KILOGRAMS": "kg",
+                    "GRAMS": "g",
+                }
+                return unit_map.get(unit, unit.lower())
+        return "m"
+    
+    def get_fabric_unit_display(self, obj):
+        """Get the human-readable unit name"""
+        if obj.fabric_issued:
+            unit = obj.fabric_issued.unit
+            if unit:
+                unit_map = {
+                    "METERS": "Meters",
+                    "YARDS": "Yards",
+                    "KILOGRAMS": "Kilograms",
+                    "GRAMS": "Grams",
+                }
+                return unit_map.get(unit, unit)
+        return "Meters"
 
     def get_unsent_bundle_count(self, obj):
         """Bundles not yet sent to Production -- drives the Send-to-Production
@@ -92,7 +123,8 @@ class CuttingOrderSerializer(serializers.ModelSerializer):
             "returned_quantity", "returned_at", "returned_by", "remaining_quantity",
             "received_at", "received_by", "marker", "marker_number", "ratio_sets_cut",
             "layer_length", "no_of_layers", "ratio", "quantity_display", "bundle_count",
-            "unsent_bundle_count", "half_roll", "status",
+            "unsent_bundle_count", "half_roll", "status","fabric_unit",
+            "fabric_unit_display",
             "cutting_date", "supervisor", "remarks", "created_at", "updated_at",
         ]
         read_only_fields = [
