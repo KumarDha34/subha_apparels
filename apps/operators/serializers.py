@@ -32,13 +32,19 @@ class OperatorRateSerializer(serializers.ModelSerializer):
 
 class BundleAssignmentSerializer(serializers.ModelSerializer):
     bundle_number = serializers.CharField(source="bundle.bundle_number", read_only=True)
+    size_name = serializers.CharField(source="bundle.size.name", read_only=True, default=None)
+    color_name = serializers.CharField(source="bundle.color.name", read_only=True, default=None)
+    product_code = serializers.CharField(source="bundle.cutting_order.order_item.product.code", read_only=True, default=None)
+    product_name = serializers.CharField(source="bundle.cutting_order.order_item.product.name", read_only=True, default=None)
+    order_number = serializers.CharField(source="bundle.cutting_order.order.order_number", read_only=True, default=None)
     operator_name = serializers.CharField(source="operator.name", read_only=True)
     shortage_quantity = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = BundleAssignment
         fields = [
-            "id", "bundle", "bundle_number", "operator", "operator_name",
+            "id", "bundle", "bundle_number", "size_name", "color_name", "product_code", "product_name", "order_number",
+            "operator", "operator_name",
             "assigned_date", "completion_date", "status",
             "issued_quantity", "returned_quantity", "shortage_quantity",
             "shortage_reason", "shortage_reason_status", "shortage_reviewed_by",

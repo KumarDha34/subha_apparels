@@ -174,12 +174,15 @@ class BundleSerializer(serializers.ModelSerializer):
     order = serializers.IntegerField(source="cutting_order.order_id", read_only=True, default=None)
     order_number = serializers.CharField(source="cutting_order.order.order_number", read_only=True, default=None)
     cutting_number = serializers.CharField(source="cutting_order.cutting_number", read_only=True, default=None)
+    product = serializers.IntegerField(source="cutting_order.order_item.product_id", read_only=True, default=None)
+    product_code = serializers.CharField(source="cutting_order.order_item.product.code", read_only=True, default=None)
+    product_name = serializers.CharField(source="cutting_order.order_item.product.name", read_only=True, default=None)
 
     class Meta:
         model = Bundle
         fields = [
             "id", "bundle_number", "cutting_order", "cutting_number", "order", "order_number", "color", "color_name",
-            "size", "size_name", "quantity", "status",
+            "size", "size_name", "product", "product_code", "product_name", "quantity", "status",
             "sent_to_production_at", "sent_by", "created_at", "updated_at",
         ]
         read_only_fields = ["bundle_number", "sent_to_production_at", "sent_by"]
