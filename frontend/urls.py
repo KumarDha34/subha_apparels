@@ -38,6 +38,7 @@ urlpatterns = [
     path("store/accessories/", views.page_view, {"page": "store_accessories"}, name="store-accessories"),
     path("store/stock/", views.page_view, {"page": "store_stock"}, name="store-stock"),
     path("store/finished-goods/", views.page_view, {"page": "store_finished_goods"}, name="store-finished-goods"),
+    path("store/additional-charges/", views.page_view, {"page": "store_additional_charges"}, name="store-additional-charges"),
     path("store/vendors/", views.page_view, {"page": "store_vendors"}, name="store-vendors"),
     path("store/issue-materials/", views.page_view, {"page": "store_issue_materials"}, name="store-issue-materials"),
     path("store/issue-accessories/", views.page_view, {"page": "store_issue_accessories"}, name="store-issue-accessories"),
@@ -49,6 +50,8 @@ urlpatterns = [
     path("accounts/income-expenses/", views.page_view, {"page": "accounts_income_expenses"}, name="accounts-income-expenses"),
     path("accounts/order-pnl/", views.page_view, {"page": "accounts_order_pnl"}, name="accounts-order-pnl"),
     path("accounts/quotations/", views.page_view, {"page": "accounts_quotations"}, name="accounts-quotations"),
+    path("accounts/customer-invoices/", views.page_view, {"page": "accounts_customer_invoices"}, name="accounts-customer-invoices"),
+    path("accounts/operator-payments/", views.page_view, {"page": "accounts_operator_payments"}, name="accounts-operator-payments"),
 
     # Cutting's own screens: receiving fabric from Store, recording the
     # actual cut result, and bundling -- the dashboard stays overview-only.
@@ -72,6 +75,7 @@ urlpatterns = [
     # Finishing's own screens: operation-type-aware finishing work with
     # cost tracking, and dispatch with printable packing list/challan --
     # the dashboard stays overview-only.
+    path("finishing/receive/", views.page_view, {"page": "finishing_receive"}, name="finishing-receive"),
     path("finishing/operations/", views.page_view, {"page": "finishing_operations"}, name="finishing-operations"),
     path("finishing/dispatch/", views.page_view, {"page": "finishing_dispatch"}, name="finishing-dispatch"),
 ]

@@ -2,10 +2,10 @@
 {% block title %}Quality Check - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Finishing — Quality Check</h2>
-  <p class="page-subtitle">Pieces received from Production (and back from Washing / Printing / Embroidery). Finishing only inspects: mark each batch Pass, Fail, or Alter. Washing/printing/etc. are handled by Production ▸ Send to Process.</p>
+  <p class="page-subtitle">Pick an order received from Production, then record QC for each colour + size: passed, failed (with reason), altered (with reason). Results show the full breakdown.</p>
 
-  <div id="receipts-wrap"></div>
-  <div id="qc-panel"></div>
+  <div id="qc-form"></div>
+  <div id="qc-results"></div>
 {% endblock %}
 
 {% block scripts %}
@@ -13,67 +13,168 @@
   Auth.guardPage(["FINISHING_SUPERVISOR"]);
   renderShell("finishing-operations", "Quality Check");
 
-  async function refreshReceipts() {
-    const wrap = document.getElementById("receipts-wrap");
-    wrap.innerHTML = "Loading...";
-    try {
-      const receipts = await fetchAll("/finishing/receipts/");
-      wrap.innerHTML = "";
-      const body = el("div", {});
-      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Received from Production"), body]));
-      dataTable(body, {
-        columns: [
-          { label: "Order", key: "order_number" }, { label: "Quantity Sent", key: "quantity_sent", value: r => Number(r.quantity_sent) },
-          { label: "Sent At", key: "sent_at", render: r => (r.sent_at ? r.sent_at.slice(0, 16).replace("T", " ") : "—") },
-          { label: "Remarks", render: r => r.remarks || "—" },
-        ], rows: receipts, pageSize: 8, initialSort: { key: "sent_at", dir: "desc" },
-        searchPlaceholder: "Search received…", emptyText: "Nothing received yet.",
-      });
-    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
-  }
-  refreshReceipts();
+  let RECEIVED_ORDERS = [];   // [{id, order_number, party_name}]
+  let state = { order: "", breakdown: null, rows: [] };
 
-  // Alteration rework loop: record how many altered pieces passed / failed
-  // re-inspection after rework, until none are pending.
-  function openRework(q) {
-    const passI = numberInput("", () => {}, { min: "0", step: "1" });
-    const failI = numberInput("", () => {}, { min: "0", step: "1" });
-    const err = el("div", { class: "error-msg", style: "display:none;" });
-    const submit = async () => {
+  // --- attractive, reusable breakdown widgets ---
+  function statTile(label, value, tone) {
+    const c = tone === "warn" ? "#b4690e" : tone === "good" ? "#1a7f4b" : "var(--text,#333)";
+    return el("div", { style: "flex:1;min-width:120px;padding:0.7rem 0.9rem;border:1px solid var(--border,#e7e0da);border-radius:12px;background:var(--surface,#fbf9f7);text-align:center;" }, [
+      el("div", { style: `font-size:1.5rem;font-weight:800;color:${c};line-height:1.1;` }, String(value)),
+      el("div", { class: "label", style: "margin-top:0.15rem;" }, label),
+    ]);
+  }
+  function bdPills(obj) {
+    const entries = Object.entries(obj || {});
+    if (!entries.length) return el("span", { class: "muted" }, "—");
+    return el("div", { style: "display:flex;flex-wrap:wrap;gap:0.45rem;" }, entries.map(([k, v]) =>
+      el("span", { style: "display:inline-flex;align-items:baseline;gap:0.4rem;padding:0.28rem 0.7rem;border:1px solid var(--border,#e7e0da);border-radius:999px;background:var(--card,#fff);font-size:0.86rem;" },
+        [el("strong", {}, k), el("span", { class: "muted" }, String(v))])));
+  }
+
+  async function loadReceivedOrders() {
+    const recvd = await fetchAll("/production/process-dispatches/?department=FINISHING&status=RECEIVED").catch(() => []);
+    const seen = new Map();
+    recvd.forEach(r => { if (r.order != null && !seen.has(String(r.order))) seen.set(String(r.order), { id: r.order, order_number: r.order_number, party_name: r.party_name }); });
+    RECEIVED_ORDERS = [...seen.values()];
+  }
+
+  async function onOrder(id) {
+    state.order = id; state.breakdown = null; state.rows = [];
+    if (id) {
       try {
-        await apiPost(`/finishing/quality-checks/${q.id}/record_rework/`, { passed: Number(passI.value || 0), failed: Number(failI.value || 0) });
-        closeCrudModal(); notify.success("Rework recorded."); qcPanel.refresh();
-      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
-    };
-    showCrudModal(`Rework — ${q.order_number}`, [
-      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `${q.alteration_pending} of ${q.quantity_altered} altered piece(s) still pending. How did rework turn out?`),
-      err, field("Passed after rework", passI), field("Scrapped after rework", failI),
-    ], [el("button", { type: "button", onclick: submit }, "Save"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
+        state.breakdown = await apiGet(`/finishing/quality-checks/breakdown/?order=${id}`);
+        state.rows = (state.breakdown.grid || []).map(g => ({ ...g, passed: "", failed: "", altered: "", fail_reason: "", alter_reason: "" }));
+      } catch (e) { notify.error(e.message); }
+    }
+    renderForm();
   }
 
-  const qcPanel = crudPanel(document.getElementById("qc-panel"), {
-    title: "Final Quality Checks (Pass / Fail / Alter)",
-    endpoint: "/finishing/quality-checks/",
-    columns: [
-      { key: "order_number", label: "Order #" },
-      { key: "quantity_checked", label: "Checked" },
-      { key: "quantity_passed", label: "Passed" },
-      { key: "quantity_altered", label: "Altered" },
-      { key: "quantity_rejected", label: "Failed" },
-      { label: "Rework (✓/✗/pending)", sortable: false, render: q => (q.quantity_altered
-          ? `${q.quantity_reworked_passed} / ${q.quantity_reworked_failed} / ${q.alteration_pending}` : "—") },
-      { label: "Final Good", render: q => q.final_good },
-      { label: "Action", sortable: false, render: q => (q.alteration_pending > 0
-          ? el("button", { class: "secondary", type: "button", onclick: () => openRework(q) }, "Record Rework") : "—") },
-    ],
-    fields: [
-      { name: "order", label: "Order", type: "select", optionsEndpoint: "/orders/?status=IN_FINISHING", optionsLabel: "order_number", required: true },
-      { name: "quantity_checked", label: "Quantity Checked", type: "number", required: true },
-      { name: "quantity_passed", label: "Passed", type: "number", required: true },
-      { name: "quantity_altered", label: "Sent for Alteration / Rework", type: "number" },
-      { name: "quantity_rejected", label: "Failed / Rejected", type: "number" },
-      { name: "notes", label: "Notes", type: "textarea" },
-    ],
-  });
+  function renderForm() {
+    const wrap = document.getElementById("qc-form"); wrap.innerHTML = "";
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const orderSel = field("Order (received)", selectEl({ onchange: e => onOrder(e.target.value) },
+      RECEIVED_ORDERS.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name || ""}` })), state.order, "Select a received order"));
+
+    const nodes = [el("h3", {}, "✅ Record Quality Check"), err, orderSel];
+
+    if (state.order && state.breakdown) {
+      const b = state.breakdown;
+      const tiles = [];
+      if (b.process_loss) {
+        tiles.push(statTile("Produced", b.produced));
+        tiles.push(statTile("Process loss", b.process_loss, "warn"));
+        tiles.push(statTile("Received — for QC", b.total, "good"));
+      } else {
+        tiles.push(statTile("Pieces received — for QC", b.total, "good"));
+      }
+      const summary = [el("div", { style: "display:flex;gap:0.6rem;flex-wrap:wrap;margin-bottom:0.7rem;" }, tiles)];
+      if (b.process_loss) summary.push(el("p", { class: "muted", style: "margin:0 0 0.7rem;" },
+        `${b.process_loss} piece(s) were lost in processing (e.g. washing) before Finishing — QC below is on the ${b.total} pieces actually received.`));
+      summary.push(el("div", { class: "section-title" }, "Size breakdown"), bdPills(b.by_size));
+      summary.push(el("div", { class: "section-title" }, "Colour breakdown"), bdPills(b.by_color));
+      nodes.push(el("div", { class: "subcard", style: "margin:0.6rem 0;padding:0.9rem 1rem;border:1px solid var(--border,#e7e0da);border-radius:12px;" }, summary));
+      if (!state.rows.length) {
+        nodes.push(el("p", { class: "muted" }, "No produced pieces to check for this order yet."));
+      } else {
+        const table = el("table", { class: "cut-sheet" });
+        table.appendChild(el("thead", {}, el("tr", {}, ["Colour", "Size", "Available", "Passed", "Failed", "Fail reason", "Altered", "Alter reason"].map(h => el("th", {}, h)))));
+        const tb = el("tbody");
+        state.rows.forEach(r => {
+          const num = (key) => numberInput(r[key], v => r[key] = v, { min: "0", step: "1", class: "cut-input", placeholder: "0" });
+          const txt = (key) => el("input", { type: "text", value: r[key], oninput: e => r[key] = e.target.value, placeholder: "reason", style: "min-width:130px;" });
+          tb.appendChild(el("tr", {}, [
+            el("td", { class: "cut-size" }, r.color), el("td", { class: "cut-size" }, r.size),
+            el("td", { class: "cut-info" }, String(r.quantity)),
+            el("td", {}, num("passed")), el("td", {}, num("failed")), el("td", {}, txt("fail_reason")),
+            el("td", {}, num("altered")), el("td", {}, txt("alter_reason")),
+          ]));
+        });
+        table.appendChild(tb);
+        table.appendChild(el("tfoot", {}, el("tr", { style: "font-weight:700;" }, [
+          el("td", { class: "cut-size" }, "Total"), el("td", {}, ""),
+          el("td", { class: "cut-info" }, String(state.rows.reduce((s, r) => s + (r.quantity || 0), 0))),
+          el("td", { colspan: "5" }, ""),
+        ])));
+        nodes.push(el("div", { class: "section-title" }, "QC per colour + size"),
+          el("div", { class: "cut-sheet-wrap" }, table),
+          el("div", { class: "form-inline", style: "margin-top:0.7rem;" }, [el("button", { type: "button", onclick: () => saveQC(err) }, "Save Quality Check")]));
+      }
+    }
+    wrap.appendChild(el("div", { class: "card" }, nodes));
+  }
+
+  async function saveQC(err) {
+    err.style.display = "none";
+    const toSave = [];
+    for (const r of state.rows) {
+      const passed = Number(r.passed) || 0, failed = Number(r.failed) || 0, altered = Number(r.altered) || 0;
+      if (passed + failed + altered === 0) continue;
+      if (passed + failed + altered > r.quantity) { err.textContent = `${r.color}/${r.size}: passed+failed+altered (${passed + failed + altered}) exceeds available (${r.quantity}).`; err.style.display = "block"; return; }
+      if (failed > 0 && !r.fail_reason.trim()) { err.textContent = `${r.color}/${r.size}: a reason is required for failed pieces.`; err.style.display = "block"; return; }
+      if (altered > 0 && !r.alter_reason.trim()) { err.textContent = `${r.color}/${r.size}: a reason is required for altered pieces.`; err.style.display = "block"; return; }
+      toSave.push({ order: Number(state.order), color: r.color_id, size: r.size_id, quantity_checked: passed + failed + altered,
+        quantity_passed: passed, quantity_rejected: failed, quantity_altered: altered,
+        fail_reason: r.fail_reason.trim(), alter_reason: r.alter_reason.trim() });
+    }
+    if (!toSave.length) { err.textContent = "Enter QC for at least one colour/size row."; err.style.display = "block"; return; }
+    try {
+      for (const row of toSave) await apiPost("/finishing/quality-checks/", row);
+      notify.success(`Saved QC for ${toSave.length} colour/size row(s).`);
+      state = { order: "", breakdown: null, rows: [] };
+      renderForm(); await loadResults();
+    } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+  }
+
+  /* ---------------- results (grouped by order) ---------------- */
+  async function loadResults() {
+    const wrap = document.getElementById("qc-results"); wrap.innerHTML = "";
+    let rows;
+    try { rows = await fetchAll("/finishing/quality-checks/"); }
+    catch (e) { wrap.innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    if (!rows.length) { wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "QC Results"), el("p", { class: "muted" }, "No quality checks recorded yet.")])); return; }
+    const groups = new Map();
+    rows.forEach(r => { const k = r.order_number || r.order; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); });
+    for (const [orderNo, list] of groups.entries()) {
+      const checked = list.reduce((s, r) => s + (r.quantity_checked || 0), 0);
+      const passed = list.reduce((s, r) => s + (r.quantity_passed || 0), 0);
+      const failed = list.reduce((s, r) => s + (r.quantity_rejected || 0), 0);
+      const altered = list.reduce((s, r) => s + (r.quantity_altered || 0), 0);
+
+      const grid = el("table", { class: "data-table" });
+      grid.appendChild(el("thead", {}, el("tr", {}, ["Colour", "Size", "Passed", "Failed", "Altered"].map(h => el("th", {}, h)))));
+      grid.appendChild(el("tbody", {}, list.map(r => el("tr", {}, [
+        el("td", {}, r.color_name || "—"), el("td", {}, r.size_name || "—"),
+        el("td", {}, String(r.quantity_passed || 0)), el("td", {}, String(r.quantity_rejected || 0)), el("td", {}, String(r.quantity_altered || 0)),
+      ]))));
+
+      const fails = list.filter(r => (r.quantity_rejected || 0) > 0);
+      const failNodes = [];
+      if (fails.length) {
+        const ft = el("table", { class: "data-table" });
+        ft.appendChild(el("thead", {}, el("tr", {}, ["Size", "Colour", "Quantity", "Reason"].map(h => el("th", {}, h)))));
+        ft.appendChild(el("tbody", {}, fails.map(r => el("tr", {}, [
+          el("td", {}, r.size_name || "—"), el("td", {}, r.color_name || "—"),
+          el("td", {}, String(r.quantity_rejected)), el("td", {}, r.fail_reason || "—"),
+        ]))));
+        failNodes.push(el("div", { class: "section-title" }, "Failure reasons"), ft);
+      }
+
+      wrap.appendChild(el("div", { class: "card" }, [
+        el("h3", {}, `QC Results — ${orderNo}`),
+        el("div", { class: "grid grid-4" }, [
+          ["Total Checked", checked], ["Passed", passed], ["Failed", failed], ["Altered", altered],
+        ].map(([l, v]) => el("div", { class: "card stat" }, [el("div", { class: "value" }, String(v)), el("div", { class: "label" }, l)]))),
+        el("div", { class: "section-title" }, "Breakdown by colour & size"), grid,
+        ...failNodes,
+      ]));
+    }
+  }
+
+  (async function init() {
+    await loadReceivedOrders();
+    renderForm();
+    await loadResults();
+  })();
 </script>
 {% endblock %}

@@ -2,7 +2,7 @@
 {% block title %}Operators - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Operators</h2>
-  <p class="page-subtitle">Manage operator profiles and their pay rates. Click an operator's name to see their full overview — efficiency, bundles, pieces and daily earnings.</p>
+  <p class="page-subtitle">Manage operator profiles. Click an operator's name to see their full overview — efficiency, bundles, pieces and daily earnings. Pay is the order's <em>Rate / Piece</em> (set by Merchandising at order creation) × pieces returned — there is no per-operator rate to set here.</p>
 
   <div id="panels"></div>
 {% endblock %}
@@ -32,23 +32,6 @@
     ],
     editable: true,
     onView: (o) => showOperatorReport(o.id, o.name),
-  });
-
-  crudPanel(panels, {
-    title: "Operator Rates",
-    endpoint: "/operators/rates/",
-    columns: [
-      { key: "operator_name", label: "Operator" },
-      { key: "rate_type", label: "Rate Type" },
-      { key: "rate_amount", label: "Amount" },
-      { key: "effective_date", label: "Effective" },
-    ],
-    fields: [
-      { name: "operator", label: "Operator", type: "select", optionsEndpoint: "/operators/operators/", optionsLabel: "name", required: true },
-      { name: "rate_type", label: "Rate Type", type: "select", choices: ["PER_BUNDLE", "PER_PIECE"], required: true },
-      { name: "rate_amount", label: "Rate Amount", type: "number", required: true },
-      { name: "effective_date", label: "Effective Date", type: "date", required: true },
-    ],
   });
 </script>
 {% endblock %}

@@ -74,7 +74,7 @@
     try {
       await apiPost(`/operators/assignments/${id}/start/`, {});
       await refreshAll();
-    } catch (e) { alert("Error: " + e.message); }
+    } catch (e) { notify.error(e.message); }
   }
 
   function openReturnModal(b) {

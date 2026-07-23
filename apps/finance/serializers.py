@@ -4,8 +4,31 @@ from django.utils import timezone
 from rest_framework import serializers
 from .models import (
     PurchaseOrder, PurchaseOrderItem, Invoice, PaymentRecord,
-    IncomeRecord, ExpenseRecord, Quotation,
+    IncomeRecord, ExpenseRecord, Quotation, CustomerInvoice,
 )
+
+
+class CustomerInvoiceSerializer(serializers.ModelSerializer):
+    order_number = serializers.CharField(source="order.order_number", read_only=True)
+    party_name = serializers.CharField(source="order.party.name", read_only=True, default=None)
+    due_amount = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = CustomerInvoice
+        fields = [
+            "id", "invoice_number", "order", "order_number", "party_name", "invoice_date",
+            "amount", "paid_amount", "due_amount", "payment_status", "due_date", "remarks",
+            "created_by", "created_at",
+        ]
+        read_only_fields = ["invoice_number", "payment_status", "created_by"]
+
+    def create(self, validated_data):
+        validated_data["created_by"] = self.context["request"].user
+        invoice = super().create(validated_data)
+        # Raising the sales invoice moves the order into financial closure.
+        if invoice.order_id:
+            invoice.order.advance_status(invoice.order.Status.INVOICED)
+        return invoice
 
 
 class QuotationSerializer(serializers.ModelSerializer):
@@ -182,12 +205,15 @@ class PaymentRecordSerializer(serializers.ModelSerializer):
 
 class IncomeRecordSerializer(serializers.ModelSerializer):
     order_number = serializers.CharField(source="order.order_number", read_only=True, default=None)
+    party_name = serializers.CharField(source="order.party.name", read_only=True, default=None)
+    invoice_number = serializers.CharField(source="customer_invoice.invoice_number", read_only=True, default=None)
 
     class Meta:
         model = IncomeRecord
         fields = [
-            "id", "order", "order_number", "income_type", "amount",
-            "received_date", "remarks", "recorded_by", "created_at",
+            "id", "order", "order_number", "party_name", "customer_invoice", "invoice_number",
+            "income_type", "amount", "received_date", "payment_method", "reference",
+            "remarks", "recorded_by", "created_at",
         ]
         read_only_fields = ["recorded_by"]
 

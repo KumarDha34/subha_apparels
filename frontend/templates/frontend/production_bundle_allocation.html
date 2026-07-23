@@ -14,7 +14,7 @@
   renderShell("production-bundle-allocation", "Bundle Allocation");
 
   let MASTER = { bundles: [], operators: [] };
-  let assignState = { product: "", bundle: "", operator: "", issued_quantity: "" };
+  let assignState = { product: "", bundle: "", operator: "", issued_quantity: "", rate_per_piece: "" };
 
   async function loadMaster() {
     const [bundles, operators] = await Promise.all([
@@ -55,6 +55,7 @@
         assignState.bundle, assignState.product ? "Select size / bundle" : "Select a product first")),
       field("Operator", selectEl({ onchange: e => assignState.operator = e.target.value },
         MASTER.operators.map(o => ({ value: o.id, label: o.name })), assignState.operator, "Select operator")),
+      field("Rate / Piece (Rs.)", numberInput(assignState.rate_per_piece, v => assignState.rate_per_piece = v, { min: "0", step: "0.01", placeholder: "operator pay per piece", required: "required" })),
       field("Issued Qty (optional)", numberInput(assignState.issued_quantity, v => assignState.issued_quantity = v, { min: "0", placeholder: "defaults to bundle qty" })),
     ]);
     wrap.appendChild(el("div", { class: "card" }, [
@@ -72,12 +73,16 @@
       if (errorBox) { errorBox.textContent = "Select a bundle and an operator."; errorBox.style.display = "block"; }
       return;
     }
+    if (assignState.rate_per_piece === "" || Number(assignState.rate_per_piece) < 0) {
+      if (errorBox) { errorBox.textContent = "Enter the operator's pay rate per piece."; errorBox.style.display = "block"; }
+      return;
+    }
     try {
-      const body = { bundle: Number(assignState.bundle), operator: Number(assignState.operator) };
+      const body = { bundle: Number(assignState.bundle), operator: Number(assignState.operator), rate_per_piece: Number(assignState.rate_per_piece) };
       if (assignState.issued_quantity) body.issued_quantity = Number(assignState.issued_quantity);
       await apiPost("/operators/assignments/", body);
       notify.success("Bundle allocated — operator started.");
-      assignState = { product: assignState.product, bundle: "", operator: "", issued_quantity: "" };
+      assignState = { product: assignState.product, bundle: "", operator: "", issued_quantity: "", rate_per_piece: "" };
       await loadMaster();
       renderAssignForm();
       await refreshAssignments();
@@ -161,6 +166,7 @@
           { label: "Product", value: a => `${a.product_code || ""} ${a.product_name || ""}`, render: a => (a.product_code ? `${a.product_code} — ${a.product_name}` : (a.product_name || "—")) },
           { label: "Size", value: a => a.size_name || "", render: a => (a.size_name ? `Size ${a.size_name}${a.color_name ? " · " + a.color_name : ""}` : "—") },
           { label: "Operator", key: "operator_name" },
+          { label: "Rate/pc", value: a => Number(a.rate_per_piece ?? 0), render: a => (a.rate_per_piece != null ? fmtMoney(a.rate_per_piece) : "—") },
           { label: "Issued/Returned", value: a => Number(a.returned_quantity ?? a.issued_quantity ?? 0), render: a => `${a.issued_quantity ?? "—"} / ${a.returned_quantity ?? "—"}` },
           { label: "Status", key: "status", render: a => badge(a.status) },
           { label: "Shortage Review", value: a => a.shortage_reason_status, render: a => renderShortageCell(a) },

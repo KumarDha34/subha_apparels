@@ -2,7 +2,7 @@
 {% block title %}Users & Roles - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Users & Roles</h2>
-  <p class="page-subtitle">Create a login for each employee and assign the role that drives their dashboard and permissions.</p>
+  <p class="page-subtitle">Create a login for each employee and assign the role that drives their dashboard and permissions. Operators are not created here — Production manages them under Production ▸ Operators.</p>
   <div id="reset-requests"></div>
   <div id="panels"></div>
 {% endblock %}
@@ -32,7 +32,7 @@
       { name: "phone", label: "Phone" },
       {
         name: "role", label: "Role", type: "select", required: true,
-        choices: ["ADMIN", "MERCHANDISE", "STORE_MANAGER", "CUTTING_SUPERVISOR", "PRODUCTION_SUPERVISOR", "FINISHING_SUPERVISOR", "ACCOUNTS", "OPERATOR"],
+        choices: ["ADMIN", "MERCHANDISE", "STORE_MANAGER", "CUTTING_SUPERVISOR", "PRODUCTION_SUPERVISOR", "FINISHING_SUPERVISOR", "ACCOUNTS"],
       },
     ],
   });

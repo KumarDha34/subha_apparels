@@ -1,33 +1,13 @@
+from decimal import Decimal
 from rest_framework import serializers
 from apps.cutting.models import Bundle
-from .models import Operator, OperatorRate, BundleAssignment, OperatorIncome
+from .models import Operator, BundleAssignment, OperatorIncome
 
 
 class OperatorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Operator
         fields = "__all__"
-
-
-class OperatorRateSerializer(serializers.ModelSerializer):
-    operator_name = serializers.CharField(source="operator.name", read_only=True)
-    order_number = serializers.CharField(source="order.order_number", read_only=True, default=None)
-
-    class Meta:
-        model = OperatorRate
-        fields = [
-            "id", "operator", "operator_name", "product", "order", "order_number", "rate_type",
-            "rate_amount", "effective_date", "is_active", "created_at",
-        ]
-
-    def validate(self, attrs):
-        order = attrs.get("order", getattr(self.instance, "order", None))
-        product = attrs.get("product", getattr(self.instance, "product", None))
-        if order and product:
-            raise serializers.ValidationError(
-                "Leave Product blank for an order-specific rate -- it applies to all work on that order."
-            )
-        return attrs
 
 
 class BundleAssignmentSerializer(serializers.ModelSerializer):
@@ -39,12 +19,14 @@ class BundleAssignmentSerializer(serializers.ModelSerializer):
     order_number = serializers.CharField(source="bundle.cutting_order.order.order_number", read_only=True, default=None)
     operator_name = serializers.CharField(source="operator.name", read_only=True)
     shortage_quantity = serializers.IntegerField(read_only=True)
+    # Set by Production at allocation -- required when creating an assignment.
+    rate_per_piece = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"))
 
     class Meta:
         model = BundleAssignment
         fields = [
             "id", "bundle", "bundle_number", "size_name", "color_name", "product_code", "product_name", "order_number",
-            "operator", "operator_name",
+            "operator", "operator_name", "rate_per_piece",
             "assigned_date", "completion_date", "status",
             "issued_quantity", "returned_quantity", "shortage_quantity",
             "shortage_reason", "shortage_reason_status", "shortage_reviewed_by",

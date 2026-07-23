@@ -5,6 +5,8 @@ from apps.orders.models import Order
 
 class FinishingQualityCheckSerializer(serializers.ModelSerializer):
     order_number = serializers.CharField(source="order.order_number", read_only=True)
+    color_name = serializers.CharField(source="color.name", read_only=True, default=None)
+    size_name = serializers.CharField(source="size.name", read_only=True, default=None)
     alteration_pending = serializers.IntegerField(read_only=True)
     final_good = serializers.IntegerField(read_only=True)
 
@@ -69,11 +71,13 @@ class FinishingReceiptSerializer(serializers.ModelSerializer):
 
 class DispatchSerializer(serializers.ModelSerializer):
     order_number = serializers.CharField(source="order.order_number", read_only=True)
+    party_name = serializers.CharField(source="order.party.name", read_only=True, default=None)
 
     class Meta:
         model = Dispatch
         fields = [
-            "id", "order", "order_number", "dispatched_by", "dispatch_date",
+            "id", "order", "order_number", "party_name", "dispatched_by", "dispatch_date",
+            "challan_number", "size_breakdown", "color_breakdown",
             "tracking_number", "carrier", "mode_of_transport", "quantity_dispatched",
             "delivery_date", "delivery_acknowledged_by", "transport_cost",
             "status", "remarks", "created_at",

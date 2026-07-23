@@ -160,9 +160,11 @@ class ProcessDispatchViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def suggested_quantity(self, request):
-        """Suggest how many pieces to send for an order = accepted (returned &
-        QC'd) pieces. Query: ?order=<id>."""
-        return Response({"suggested_quantity": self._accepted_pieces(request.query_params.get("order"))})
+        """Suggest how many pieces to send for an order = pieces currently
+        AVAILABLE = accepted from Production minus every already-approved
+        process loss (so a piece lost in Washing isn't offered again to
+        Finishing). Query: ?order=<id>."""
+        return Response({"suggested_quantity": self._available_pieces(request.query_params.get("order"))})
 
     @staticmethod
     def _accepted_pieces(order_id):
@@ -174,6 +176,20 @@ class ProcessDispatchViewSet(viewsets.ModelViewSet):
             status__in=[BundleAssignment.Status.COMPLETED, BundleAssignment.Status.QUALITY_CHECKED],
         ).aggregate(q=Sum("returned_quantity"))["q"] or 0)
 
+    @staticmethod
+    def _approved_process_loss(order_id):
+        """Total pieces lost to processing departments whose shortfall an Admin
+        has already APPROVED -- these pieces are gone for good."""
+        if not order_id:
+            return 0
+        total = sum(pd.loss_quantity for pd in ProcessDispatch.objects.filter(
+            order_id=order_id, loss_status=ProcessDispatch.LossStatus.APPROVED))
+        return int(total)
+
+    @classmethod
+    def _available_pieces(cls, order_id):
+        return max(cls._accepted_pieces(order_id) - cls._approved_process_loss(order_id), 0)
+
     @action(detail=False, methods=["get"])
     def order_summary(self, request):
         """Everything the sender needs when picking an order: party, products,
@@ -184,6 +200,7 @@ class ProcessDispatchViewSet(viewsets.ModelViewSet):
         if not order:
             return Response({"detail": "Order not found."}, status=404)
         accepted = self._accepted_pieces(order_id)
+        approved_loss = self._approved_process_loss(order_id)
         by_department = {}
         for pd in ProcessDispatch.objects.filter(order_id=order_id):
             e = by_department.setdefault(pd.department, {"sent": 0, "received": 0})
@@ -193,7 +210,8 @@ class ProcessDispatchViewSet(viewsets.ModelViewSet):
         return Response({
             "order_number": order.order_number, "party_name": order.party.name if order.party_id else "",
             "order_type": order.order_type, "status": order.status, "items": items,
-            "accepted_pieces": accepted, "by_department": by_department,
+            "accepted_pieces": accepted, "approved_loss": approved_loss,
+            "available_pieces": max(accepted - approved_loss, 0), "by_department": by_department,
         })
 
     @action(detail=True, methods=["post"])

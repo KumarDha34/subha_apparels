@@ -102,7 +102,7 @@
     try {
       await apiPost(`/cutting/bundles/${bundle.id}/send_to_production/`, {});
       await refreshBundles();
-    } catch (e) { alert("Error: " + e.message); }
+    } catch (e) { notify.error(e.message); }
   }
 
   async function refreshBundles() {

@@ -32,7 +32,7 @@
     if (id) {
       try {
         summary = await apiGet(`/production/process-dispatches/order_summary/?order=${id}`);
-        if (!state.quantity_sent) state.quantity_sent = summary.accepted_pieces;
+        if (!state.quantity_sent) state.quantity_sent = summary.available_pieces;
       } catch (e) { notify.error(e.message); }
     }
     renderForm();
@@ -53,6 +53,8 @@
         ["Order", summary.order_number], ["Company", summary.party_name],
         ["Type", summary.order_type ? summary.order_type.replace("_", " ") : "—"],
         ["Accepted from Production", `${summary.accepted_pieces} pcs`],
+        ["Lost in processing (approved)", `${summary.approved_loss || 0} pcs`],
+        ["Available now", `${summary.available_pieces} pcs`],
       ]),
       el("div", { class: "muted", style: "margin:0.2rem 0;" }, "Products: " + (summary.items.map(i => `${i.product} (${i.fabric})`).join(" · ") || "—")),
       el("div", { class: "section-title" }, "Already sent to processes"),

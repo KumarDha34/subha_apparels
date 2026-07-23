@@ -2,7 +2,7 @@
 {% block title %}Dispatch - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Dispatch</h2>
-  <p class="page-subtitle">Pick a finished order, check the final quantity you have, enter how many to dispatch — that's it. Print a Packing List or Challan for each shipment.</p>
+  <p class="page-subtitle">Pick a finished order — the quantity and the size/colour breakdown are filled in automatically from what passed Quality Check. Enter a challan number and dispatch. Print a Delivery Challan for each shipment.</p>
 
   <div id="dispatch-form"></div>
   <div id="dispatch-list"></div>
@@ -14,23 +14,47 @@
   renderShell("finishing-dispatch", "Dispatch");
 
   let ORDERS = [];
-  let state = { order: "", quantity: "", finalQty: null };
+  let state = { order: "", quantity: "", finalQty: null, challan: "", sizeBd: {}, colorBd: {} };
+
+  // --- attractive breakdown widgets (shared look with the QC screen) ---
+  function statTile(label, value, tone) {
+    const c = tone === "good" ? "#1a7f4b" : "var(--text,#333)";
+    return el("div", { style: "flex:1;min-width:130px;padding:0.7rem 0.9rem;border:1px solid var(--border,#e7e0da);border-radius:12px;background:var(--surface,#fbf9f7);text-align:center;" }, [
+      el("div", { style: `font-size:1.5rem;font-weight:800;color:${c};line-height:1.1;` }, String(value)),
+      el("div", { class: "label", style: "margin-top:0.15rem;" }, label),
+    ]);
+  }
+  function bdPills(obj) {
+    const entries = Object.entries(obj || {});
+    if (!entries.length) return el("span", { class: "muted" }, "—");
+    return el("div", { style: "display:flex;flex-wrap:wrap;gap:0.45rem;" }, entries.map(([k, v]) =>
+      el("span", { style: "display:inline-flex;align-items:baseline;gap:0.4rem;padding:0.28rem 0.7rem;border:1px solid var(--border,#e7e0da);border-radius:999px;background:var(--card,#fff);font-size:0.86rem;" },
+        [el("strong", {}, k), el("span", { class: "muted" }, String(v))])));
+  }
+
+  // Size + colour breakdown of the pieces that passed Finishing QC.
+  async function passedBreakdown(orderId) {
+    const qcs = await fetchAll(`/finishing/quality-checks/?order=${orderId}`).catch(() => []);
+    const bySize = {}, byColor = {}; let total = 0;
+    qcs.forEach(q => {
+      const p = q.quantity_passed || 0; if (!p) return;
+      total += p;
+      const s = q.size_name || "—", c = q.color_name || "—";
+      bySize[s] = (bySize[s] || 0) + p;
+      byColor[c] = (byColor[c] || 0) + p;
+    });
+    return { total, bySize, byColor };
+  }
 
   function openPrintWindow(title, bodyHtml) {
     const win = window.open("", "_blank", "width=800,height=900");
     win.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>
       body{font-family:Arial,sans-serif;padding:2rem;color:#111;} h1{font-size:1.4rem;margin-bottom:.2rem;}
-      h2{font-size:1rem;color:#555;margin-top:0;font-weight:normal;} table{width:100%;border-collapse:collapse;margin-top:1.5rem;}
+      h2{font-size:1rem;color:#555;margin-top:0;font-weight:normal;} table{width:100%;border-collapse:collapse;margin-top:1rem;}
       th,td{border:1px solid #999;padding:.5rem .75rem;text-align:left;} th{background:#f0f0f0;}
       .sign{margin-top:3rem;display:grid;grid-template-columns:1fr 1fr;gap:2rem;} .sign div{border-top:1px solid #333;padding-top:.3rem;margin-top:2.5rem;}
       </style></head><body>${bodyHtml}<script>window.onload=()=>window.print();<\/script></body></html>`);
     win.document.close();
-  }
-
-  async function finalQuantityFor(orderId) {
-    // "Final quantity we have" = pieces that passed the Finishing QC.
-    const qcs = await fetchAll(`/finishing/quality-checks/?order=${orderId}`).catch(() => []);
-    return qcs.reduce((s, q) => s + (q.quantity_passed || 0), 0);
   }
 
   async function renderForm() {
@@ -38,23 +62,40 @@
     wrap.innerHTML = "";
     const err = el("div", { class: "error-msg", style: "display:none;" });
     const finalLine = el("div", { class: "mode-banner mode-fixed", style: state.order ? "" : "display:none;" });
+    const breakdownWrap = el("div", { style: "margin-top:0.6rem;" });
     const qtyInput = numberInput(state.quantity, v => state.quantity = v, { min: "0", step: "1", placeholder: "pieces to dispatch" });
 
+    function renderBreakdown() {
+      breakdownWrap.innerHTML = "";
+      if (!state.order || state.finalQty == null) return;
+      breakdownWrap.appendChild(el("div", { class: "subcard", style: "padding:0.9rem 1rem;border:1px solid var(--border,#e7e0da);border-radius:12px;" }, [
+        el("div", { style: "display:flex;gap:0.6rem;flex-wrap:wrap;margin-bottom:0.7rem;" }, [
+          statTile("Passed QC — ready to dispatch", state.finalQty, "good"),
+        ]),
+        el("div", { class: "section-title" }, "Size breakdown"), bdPills(state.sizeBd),
+        el("div", { class: "section-title" }, "Colour breakdown"), bdPills(state.colorBd),
+        el("p", { class: "muted", style: "margin:0.6rem 0 0;" }, "Auto-filled from Quality Check — this is what prints on the challan."),
+      ]));
+    }
+
     async function onOrder(id) {
-      state.order = id; state.finalQty = null; state.quantity = "";
+      state.order = id; state.finalQty = null; state.quantity = ""; state.sizeBd = {}; state.colorBd = {};
       if (id) {
-        state.finalQty = await finalQuantityFor(id);
+        const bd = await passedBreakdown(id);
+        state.finalQty = bd.total; state.sizeBd = bd.bySize; state.colorBd = bd.byColor;
         finalLine.style.display = "";
         finalLine.innerHTML = "";
         finalLine.append(el("strong", {}, "Final available: "), `${state.finalQty} pieces passed QC — enter how many to dispatch.`);
         state.quantity = String(state.finalQty);
         qtyInput.value = state.quantity;
       } else { finalLine.style.display = "none"; }
+      renderBreakdown();
     }
 
     const form = el("div", { class: "form-inline" }, [
       field("Order (finished)", selectEl({ onchange: e => onOrder(e.target.value) },
         ORDERS.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "Select order")),
+      field("Challan Number", el("input", { type: "text", value: state.challan, placeholder: "e.g. CH-2026-001", oninput: e => state.challan = e.target.value })),
       field("Quantity to Dispatch", qtyInput),
     ]);
     const submit = async () => {
@@ -63,15 +104,19 @@
       if (!state.quantity || Number(state.quantity) <= 0) { err.textContent = "Enter a quantity to dispatch."; err.style.display = "block"; return; }
       if (state.finalQty != null && Number(state.quantity) > state.finalQty) { err.textContent = `Only ${state.finalQty} pieces are available (passed QC).`; err.style.display = "block"; return; }
       try {
-        await apiPost("/finishing/dispatch/", { order: Number(state.order), quantity_dispatched: Number(state.quantity), status: "DISPATCHED", dispatch_date: new Date().toISOString().slice(0, 10) });
+        await apiPost("/finishing/dispatch/", {
+          order: Number(state.order), quantity_dispatched: Number(state.quantity), status: "DISPATCHED",
+          dispatch_date: new Date().toISOString().slice(0, 10), challan_number: state.challan || "",
+          size_breakdown: state.sizeBd, color_breakdown: state.colorBd,
+        });
         notify.success("Order dispatched.");
-        state = { order: "", quantity: "", finalQty: null };
+        state = { order: "", quantity: "", finalQty: null, challan: "", sizeBd: {}, colorBd: {} };
         await load();
       } catch (e) { err.textContent = e.message; err.style.display = "block"; }
     };
     wrap.appendChild(el("div", { class: "card" }, [
       el("h3", {}, "🚚 Dispatch an Order"),
-      err, form, finalLine,
+      err, form, finalLine, breakdownWrap,
       el("div", { class: "form-inline", style: "margin-top:0.8rem;" }, [el("button", { type: "button", onclick: submit }, "Dispatch")]),
     ]));
     if (state.order) onOrder(state.order);
@@ -80,11 +125,43 @@
   async function printChallan(d) {
     try {
       const order = await apiGet(`/orders/${d.order}/`);
-      openPrintWindow("Delivery Challan", `<h1>Delivery Challan</h1><h2>Order ${order.order_number} — ${order.party_name}</h2>
-        <table><thead><tr><th>Order</th><th>Quantity Dispatched</th><th>Dispatch Date</th><th>Status</th></tr></thead>
-        <tbody><tr><td>${order.order_number}</td><td>${d.quantity_dispatched ?? "—"}</td><td>${d.dispatch_date || "—"}</td><td>${d.status}</td></tr></tbody></table>
-        <div class="sign"><div>Dispatched By</div><div>Received By</div></div>`);
-    } catch (e) { alert("Could not build challan: " + e.message); }
+      const sizeRows = Object.entries(d.size_breakdown || {});
+      const colorRows = Object.entries(d.color_breakdown || {});
+      const total = d.quantity_dispatched ?? "—";
+      const sumRows = rows => rows.reduce((s, [, v]) => s + Number(v || 0), 0);
+      const body = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div>
+            <div style="font-size:1.5rem;font-weight:800;letter-spacing:1px;">SUBHA APPARELS</div>
+            <div style="color:#555;font-size:0.82rem;">Garment Manufacturing &amp; Export</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:1.2rem;font-weight:700;">DELIVERY CHALLAN</div>
+            <div style="font-size:0.85rem;">Challan No: <strong>${d.challan_number || "—"}</strong></div>
+            <div style="font-size:0.85rem;">Date: ${d.dispatch_date || "—"}</div>
+          </div>
+        </div>
+        <hr style="margin:0.9rem 0;border:none;border-top:2px solid #333;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.3rem 2rem;font-size:0.9rem;">
+          <div><span style="color:#555;">Consignee:</span> <strong>${order.party_name || "—"}</strong></div>
+          <div><span style="color:#555;">Order No:</span> ${order.order_number}</div>
+          <div><span style="color:#555;">Order Type:</span> ${(order.order_type || "").replace("_", " ")}</div>
+          <div><span style="color:#555;">Total Dispatched:</span> <strong>${total} pcs</strong></div>
+        </div>
+        <h3 style="margin-top:1.3rem;font-size:0.95rem;">Size-wise Breakdown</h3>
+        <table><thead><tr><th>Size</th><th>Quantity</th></tr></thead><tbody>
+          ${sizeRows.length ? sizeRows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") : "<tr><td colspan='2'>—</td></tr>"}
+          <tr><th>Total</th><th>${sizeRows.length ? sumRows(sizeRows) : total}</th></tr>
+        </tbody></table>
+        <h3 style="margin-top:1rem;font-size:0.95rem;">Colour-wise Breakdown</h3>
+        <table><thead><tr><th>Colour</th><th>Quantity</th></tr></thead><tbody>
+          ${colorRows.length ? colorRows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") : "<tr><td colspan='2'>—</td></tr>"}
+          <tr><th>Total</th><th>${colorRows.length ? sumRows(colorRows) : total}</th></tr>
+        </tbody></table>
+        <p style="margin-top:1.2rem;font-size:0.82rem;color:#555;">Terms: Goods are checked and accepted at delivery. Please verify the quantity on receipt.</p>
+        <div class="sign"><div>Prepared By — Subha Apparels</div><div>Received By — Consignee</div></div>`;
+      openPrintWindow(`Challan ${d.challan_number || order.order_number}`, body);
+    } catch (e) { notify.error("Could not build challan — " + e.message); }
   }
 
   async function load() {
@@ -101,6 +178,7 @@
     dataTable(body, {
       columns: [
         { key: "order_number", label: "Order #" },
+        { key: "challan_number", label: "Challan #", render: d => d.challan_number || "—" },
         { key: "quantity_dispatched", label: "Qty Dispatched", value: d => Number(d.quantity_dispatched || 0) },
         { key: "dispatch_date", label: "Date", render: d => d.dispatch_date || "—" },
         { render: d => badge(d.status), label: "Status", value: d => d.status },

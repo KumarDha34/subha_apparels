@@ -92,6 +92,38 @@ class AccessoryStock(TimeStampedModel):
         return self.available_quantity <= 0
 
 
+class OrderAdditionalCharge(TimeStampedModel):
+    """Extra, non-material costs booked against an order after it's created --
+    transport, courier, customs, storage, sample development, testing, late
+    penalties, handling labour -- usually incurred and entered by Store, so the
+    order's true cost (and P&L) reflects everything, not just materials.
+    Production processes (washing/printing/embroidery/finishing) are NOT charges
+    here; those are captured as ProcessDispatch costs."""
+
+    class ChargeType(models.TextChoices):
+        TRANSPORT = "TRANSPORT", "Transport / Freight"
+        COURIER = "COURIER", "Courier"
+        CUSTOMS = "CUSTOMS", "Customs Clearance"
+        STORAGE = "STORAGE", "Storage / Warehousing"
+        SAMPLE = "SAMPLE", "Sample Development"
+        TESTING = "TESTING", "Testing / Inspection"
+        PENALTY = "PENALTY", "Late Delivery Penalty"
+        LABOUR = "LABOUR", "Labour / Handling"
+        OTHER = "OTHER", "Other"
+
+    order = models.ForeignKey("orders.Order", on_delete=models.CASCADE, related_name="additional_charges")
+    charge_type = models.CharField(max_length=20, choices=ChargeType.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0"))])
+    remarks = models.TextField(blank=True)
+    created_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="order_additional_charges")
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.get_charge_type_display()} — {self.amount} ({self.order_id})"
+
+
 class FinishedGoodsReceipt(TimeStampedModel):
     """Completed garments handed to Store's finished-goods area. Created
     automatically when Finishing records a Dispatch, so Store keeps a running

@@ -13,13 +13,60 @@ from apps.operators.models import OperatorIncome, BundleAssignment
 from apps.operators.services import assignment_labor_cost
 from apps.orders.models import Order
 from . import services
-from .models import PurchaseOrder, PurchaseOrderItem, Invoice, PaymentRecord, IncomeRecord, ExpenseRecord, Quotation
+from .models import PurchaseOrder, PurchaseOrderItem, Invoice, PaymentRecord, IncomeRecord, ExpenseRecord, Quotation, CustomerInvoice
 from .serializers import (
     PurchaseOrderSerializer, InvoiceSerializer, AddCostSerializer,
     PaymentRecordSerializer, IncomeRecordSerializer, ExpenseRecordSerializer, QuotationSerializer,
+    CustomerInvoiceSerializer,
 )
 
 ACCOUNTS_ROLES = ["ADMIN", "ACCOUNTS", "STORE_MANAGER"]
+
+
+class CustomerInvoiceViewSet(viewsets.ModelViewSet):
+    """Sales invoices raised manually to customers (usually after dispatch),
+    created by Accounts like quotations. Supports partial payments."""
+    queryset = CustomerInvoice.objects.select_related("order__party").all()
+    serializer_class = CustomerInvoiceSerializer
+    permission_classes = [ReadOnlyOrHasRole]
+    required_roles = ["ADMIN", "ACCOUNTS"]
+    filterset_fields = ["order", "payment_status"]
+    search_fields = ["invoice_number", "order__order_number"]
+
+    @action(detail=True, methods=["post"])
+    def record_payment(self, request, pk=None):
+        """Body: {amount}. Adds a (partial) payment; status recomputes."""
+        inv = self.get_object()
+        try:
+            amount = Decimal(str(request.data.get("amount")))
+        except Exception:
+            return Response({"detail": "A valid amount is required."}, status=400)
+        if amount <= 0 or amount > inv.due_amount:
+            return Response({"detail": f"amount must be between 0 and {inv.due_amount} (due)."}, status=400)
+        inv.paid_amount += amount
+        inv.save()  # save() re-derives payment_status
+
+        # Single source of truth: every invoice payment books an IncomeRecord
+        # linked to the order + invoice, so it flows straight into the accounts
+        # dashboard, party ledger, order P&L and the sales report. A payment that
+        # fully settles the invoice is FINAL; a partial one is an ADVANCE.
+        fully_paid = inv.payment_status == CustomerInvoice.PaymentStatus.PAID
+        IncomeRecord.objects.create(
+            order=inv.order,
+            customer_invoice=inv,
+            income_type=(IncomeRecord.IncomeType.FINAL if fully_paid else IncomeRecord.IncomeType.ADVANCE),
+            amount=amount,
+            received_date=request.data.get("payment_date") or timezone.localdate(),
+            payment_method=request.data.get("payment_method", ""),
+            reference=request.data.get("reference", ""),
+            remarks=f"Payment against sales invoice {inv.invoice_number}"
+                    + (f" (order {inv.order.order_number})" if inv.order_id else ""),
+            recorded_by=request.user,
+        )
+        # Once the buyer has fully settled, the order's financial cycle closes.
+        if fully_paid and inv.order_id:
+            inv.order.advance_status(inv.order.Status.PAID)
+        return Response(self.get_serializer(inv).data)
 
 
 class QuotationViewSet(viewsets.ModelViewSet):
@@ -89,7 +136,7 @@ class QuotationViewSet(viewsets.ModelViewSet):
             )
             item = OrderItem.objects.create(
                 order=order, product=quote.product, fabric_type=fabric,
-                approved_average=Decimal("1.000"), price_per_piece=quote.rate_per_piece,
+                approved_average=Decimal("1.000"),
             )
             oic = OrderItemColor.objects.create(order_item=item, color=color)
             OrderItemColorSize.objects.create(order_item_color=oic, size=size, quantity=quote.quantity)
@@ -306,8 +353,9 @@ class OrderPnLView(APIView):
     ORDER_SPECIFIC/CUSTOMER_SUPPLIED POs tied to this order via
     PurchaseOrder.related_order -- BULK-purchased general stock is
     intentionally excluded, since that's shared inventory, not order-
-    specific spend), labor cost (via the same resolve_operator_rates
-    helper OperatorIncome.calculate uses, so the two never drift), finishing
+    specific spend), labor cost (via the same assignment_labor_cost
+    helper OperatorIncome.calculate uses, so the two never drift -- each
+    operator is paid the bundle assignment's rate_per_piece x pieces returned), finishing
     cost, transport cost, income received, and profit/loss.
     """
     permission_classes = [HasRole]
@@ -338,13 +386,19 @@ class OrderPnLView(APIView):
             status__in=[BundleAssignment.Status.COMPLETED, BundleAssignment.Status.QUALITY_CHECKED],
         ).select_related("bundle__cutting_order__order_item")
         for assignment in assignments:
-            # Operators are paid the order line's price_per_piece x pieces returned.
+            # Operators are paid the assignment's rate_per_piece x pieces returned.
             labor_cost += assignment_labor_cost(assignment)
 
         finishing_cost = ProcessDispatch.objects.filter(order=order).aggregate(t=Sum("cost"))["t"] or Decimal("0")
         dispatch = Dispatch.objects.filter(order=order).first()
         transport_cost = (dispatch.transport_cost if dispatch and dispatch.transport_cost else Decimal("0"))
-        total_cost = fabric_cost + accessory_cost + labor_cost + finishing_cost + transport_cost
+
+        # Extra, non-material charges Store books against the order (transport,
+        # courier, customs, storage, testing, penalties, handling labour...).
+        from apps.store.models import OrderAdditionalCharge
+        additional_charges = OrderAdditionalCharge.objects.filter(order=order).aggregate(t=Sum("amount"))["t"] or Decimal("0")
+
+        total_cost = fabric_cost + accessory_cost + labor_cost + finishing_cost + transport_cost + additional_charges
 
         income_received = IncomeRecord.objects.filter(order=order).aggregate(t=Sum("amount"))["t"] or Decimal("0")
         profit_loss = income_received - total_cost
@@ -357,11 +411,101 @@ class OrderPnLView(APIView):
                 "labor_cost": float(labor_cost),
                 "finishing_cost": float(finishing_cost),
                 "transport_cost": float(transport_cost),
+                "additional_charges": float(additional_charges),
                 "total_cost": float(total_cost),
             },
             "income_received": float(income_received),
             "profit_loss": float(profit_loss),
             "note": "Fabric/accessory cost only includes Order-Specific and Customer-Supplied purchases tied to this order -- Bulk-purchased general stock is shared inventory and isn't attributed to any single order.",
+        })
+
+
+class PartyStatementView(APIView):
+    """GET /api/accounts/party-statement/?party=<id>  (Admin / Accounts)
+    A full statement of account for one buyer: a running-balance ledger (each
+    sales invoice is a debit, each payment received a credit), a periodic
+    summary, an ageing analysis of outstanding invoices, and a payment history.
+    Everything rolls up from CustomerInvoice + IncomeRecord -- the same records
+    the invoice screen and dashboard use."""
+    permission_classes = [HasRole]
+    required_roles = ["ADMIN", "ACCOUNTS"]
+
+    def get(self, request):
+        from apps.master_data.models import Party
+        try:
+            party = Party.objects.get(pk=request.query_params.get("party"))
+        except (Party.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Party not found."}, status=404)
+
+        from apps.orders.models import Order
+        invoices = list(CustomerInvoice.objects.filter(order__party=party).select_related("order"))
+        payments = list(IncomeRecord.objects.filter(order__party=party).select_related("order"))
+
+        # Ledger: each order's billed value is a debit (receivable up), each
+        # payment received is a credit (receivable down). The billed value is
+        # the sales invoice when one exists, else the order's own value.
+        inv_by_order = {}
+        for inv in invoices:
+            cur = inv_by_order.setdefault(inv.order_id, {"amount": 0.0, "number": None, "date": None})
+            cur["amount"] += float(inv.amount); cur["number"] = inv.invoice_number; cur["date"] = str(inv.invoice_date)
+
+        entries = []
+        for o in Order.objects.filter(party=party).exclude(status="CANCELLED"):
+            info = inv_by_order.get(o.id)
+            billed = info["amount"] if info else float(o.total_order_amount or 0)
+            if billed <= 0:
+                continue
+            entries.append({
+                "date": info["date"] if info else str(o.order_date),
+                "voucher": info["number"] if info else o.order_number,
+                "particulars": (f"Sales Invoice — {o.order_number}" if info else f"Order Value — {o.order_number}"),
+                "debit": round(billed, 2), "credit": 0.0, "_o": 0})
+        for ir in payments:
+            method = ir.get_payment_method_display() if ir.payment_method else "Payment"
+            label = f"Payment received — {method}" + (f" ({ir.reference})" if ir.reference else "")
+            entries.append({"date": str(ir.received_date), "voucher": ir.reference or f"RCPT-{ir.id}",
+                            "particulars": label, "debit": 0.0, "credit": float(ir.amount), "_o": 1})
+        entries.sort(key=lambda e: (e["date"], e["_o"]))
+        balance = 0.0
+        for e in entries:
+            balance += e["debit"] - e["credit"]
+            e["balance"] = round(balance, 2)
+            e.pop("_o", None)
+
+        total_debit = round(sum(e["debit"] for e in entries), 2)
+        total_credit = round(sum(e["credit"] for e in entries), 2)
+        closing = round(total_debit - total_credit, 2)
+
+        # Ageing of still-outstanding invoices, by age of the (due or invoice) date.
+        today = timezone.localdate()
+        ageing = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
+        for inv in invoices:
+            due = float(inv.due_amount)
+            if due <= 0:
+                continue
+            base = inv.due_date or inv.invoice_date
+            days = (today - base).days
+            bucket = "0-30" if days <= 30 else "31-60" if days <= 60 else "61-90" if days <= 90 else "90+"
+            ageing[bucket] = round(ageing[bucket] + due, 2)
+
+        pay_history = [{"date": str(ir.received_date), "reference": ir.reference or "—",
+                        "method": (ir.get_payment_method_display() if ir.payment_method else "—"),
+                        "amount": float(ir.amount)}
+                       for ir in sorted(payments, key=lambda r: str(r.received_date))]
+
+        return Response({
+            "party": {
+                "name": party.name, "code": party.code_prefix or "—",
+                "contact_person": party.contact_person or "—", "phone": party.phone or "—",
+                "email": party.email or "—", "address": party.address or "—",
+                "pan_vat": party.pan_vat or "—", "credit_terms": party.credit_terms or "—",
+                "credit_limit": float(party.credit_limit or 0),
+            },
+            "entries": entries,
+            "summary": {"opening": 0.0, "total_debit": total_debit, "total_credit": total_credit, "closing": closing},
+            "ageing": ageing,
+            "payments": pay_history,
+            "as_of": str(today),
         })
 
 
@@ -433,7 +577,7 @@ class ManagementKPIView(APIView):
 
         orders_total = Order.objects.exclude(status=Order.Status.CANCELLED).count()
         orders_pending_dispatch = Order.objects.exclude(
-            status__in=[Order.Status.DISPATCHED, Order.Status.CANCELLED]
+            status__in=Order.DISPATCHED_OR_BEYOND + [Order.Status.CANCELLED]
         ).count()
 
         # ---------------- Quality & people ----------------
@@ -454,7 +598,7 @@ class ManagementKPIView(APIView):
 
         # ---------------- Order pipeline ----------------
         total_orders_all = Order.objects.count()
-        dispatched = Order.objects.filter(status=Order.Status.DISPATCHED).count()
+        dispatched = Order.objects.filter(status__in=Order.DISPATCHED_OR_BEYOND).count()
         cancelled = Order.objects.filter(status=Order.Status.CANCELLED).count()
         in_progress = orders_total - dispatched
         fulfilment_rate = round(dispatched / total_orders_all * 100) if total_orders_all else 0
@@ -472,7 +616,7 @@ class ManagementKPIView(APIView):
             })
             qty = a.returned_quantity or 0
             d["pieces"] += qty
-            d["labor"] += Decimal(oi.price_per_piece or 0) * qty
+            d["labor"] += Decimal(a.rate_per_piece or 0) * qty
         by_style = sorted(style_map.values(), key=lambda r: r["pieces"], reverse=True)[:8]
         by_style = [{
             "style": r["style"], "pieces": r["pieces"], "labor_cost": float(r["labor"]),
@@ -482,7 +626,7 @@ class ManagementKPIView(APIView):
         # ---------------- Needs attention ----------------
         attention = []
         cutoff = today - timedelta(days=14)
-        for o in (Order.objects.exclude(status__in=[Order.Status.DISPATCHED, Order.Status.CANCELLED])
+        for o in (Order.objects.exclude(status__in=Order.DISPATCHED_OR_BEYOND + [Order.Status.CANCELLED])
                   .filter(order_date__lte=cutoff).select_related("party").order_by("order_date")[:5]):
             attention.append({
                 "level": "danger",

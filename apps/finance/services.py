@@ -45,10 +45,19 @@ def apply_receipt(item, delta, rate, po, user):
                 stock.available_quantity = qty
                 stock.save(update_fields=["available_quantity", "updated_at"])
         else:
-            stock, _ = FabricStock.objects.get_or_create(
-                fabric_type=item.fabric_type, color=item.color,
-                defaults={"unit": item.unit or FabricUnit.METERS, "vendor": po.vendor},
-            )
+            # Single-roll vendor/bulk receipts merge into one running-balance
+            # row -- the aggregate row is the blank-roll_number one, so it must
+            # NOT collide with the per-roll stocks (which carry a roll_number).
+            # filter().first() (not get_or_create) keeps this safe even if more
+            # than one aggregate row already exists for this fabric+colour.
+            stock = FabricStock.objects.filter(
+                fabric_type=item.fabric_type, color=item.color, roll_number="",
+            ).first()
+            if stock is None:
+                stock = FabricStock.objects.create(
+                    fabric_type=item.fabric_type, color=item.color, roll_number="",
+                    unit=item.unit or FabricUnit.METERS, vendor=po.vendor,
+                )
             StockTransaction.objects.create(
                 fabric_stock=stock, transaction_type=StockTransaction.TransactionType.RECEIPT,
                 quantity=delta, reference=reference, remarks=remarks, created_by=user,

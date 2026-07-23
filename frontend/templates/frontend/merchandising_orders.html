@@ -73,7 +73,7 @@
     return { party: "", order_date: "", order_type: "FIXED_QUANTITY", is_repeat: false, remarks: "", cutting_instruction: "", items: [blankItem()] };
   }
   function blankItem() {
-    return { cid: nextClientId++, product: "", fabric_type: "", approved_average: "", price_per_piece: "", inner_required: false, fusing_required: false, resting_needed: false, colors: [blankColor()] };
+    return { cid: nextClientId++, product: "", fabric_type: "", approved_average: "", inner_required: false, fusing_required: false, resting_needed: false, colors: [blankColor()] };
   }
   function blankColor() {
     return { cid: nextClientId++, color: "", rolls: [], half_roll: false, size_lines: [blankSizeLine()] };
@@ -225,7 +225,6 @@
           MASTER.fabricTypes.map(f => ({ value: f.id, label: f.gsm ? `${f.name} · ${f.gsm} GSM` : f.name })), item.fabric_type, "Select fabric type"),
         created => { MASTER.fabricTypes.push(created); item.fabric_type = created.id; renderOrderBuilder(); })),
       field("Approved Average (per pc)", numberInput(item.approved_average, v => item.approved_average = v, { step: "0.001", required: "required" })),
-      field("Operator Rate / Piece (Rs.)", numberInput(item.price_per_piece, v => item.price_per_piece = v, { step: "0.01", min: "0", required: "required" })),
       field("Inner Required", yesNoCheckbox(item.inner_required, v => item.inner_required = v)),
       field("Fusing Required", yesNoCheckbox(item.fusing_required, v => item.fusing_required = v)),
       field("Resting Needed", yesNoCheckbox(item.resting_needed, v => item.resting_needed = v)),
@@ -353,7 +352,6 @@
       if (!item.product) errors.push(`Item ${i + 1}: select a product.`);
       if (!item.fabric_type) errors.push(`Item ${i + 1}: select a fabric type.`);
       if (!item.approved_average) errors.push(`Item ${i + 1}: enter approved average.`);
-      if (item.price_per_piece === "" || Number(item.price_per_piece) < 0) errors.push(`Item ${i + 1}: enter the operator rate per piece.`);
       if (!item.colors.length) errors.push(`Item ${i + 1}: add at least one color.`);
       item.colors.forEach(color => {
         if (!color.color) errors.push(`Item ${i + 1}: select a color.`);
@@ -382,7 +380,6 @@
         product: Number(item.product),
         fabric_type: Number(item.fabric_type),
         approved_average: item.approved_average === "" ? null : Number(item.approved_average),
-        price_per_piece: item.price_per_piece === "" ? 0 : Number(item.price_per_piece),
         inner_required: !!item.inner_required,
         fusing_required: !!item.fusing_required,
         resting_needed: !!item.resting_needed,
@@ -406,7 +403,7 @@
       is_repeat: order.is_repeat, remarks: order.remarks || "", cutting_instruction: order.cutting_instruction || "",
       items: order.items.map(item => ({
         cid: nextClientId++, product: item.product, fabric_type: item.fabric_type,
-        approved_average: item.approved_average ?? "", price_per_piece: item.price_per_piece ?? "", inner_required: !!item.inner_required,
+        approved_average: item.approved_average ?? "", inner_required: !!item.inner_required,
         fusing_required: !!item.fusing_required, resting_needed: item.resting_needed,
         colors: item.colors.map(color => ({
           cid: nextClientId++, color: color.color, rolls: (color.rolls || []).map(Number), half_roll: !!color.half_roll,
@@ -434,7 +431,7 @@
       builderVisible = false;
       renderOrderBuilder();
       await refreshOrders();
-    } catch (e) { alert("Error: " + e.message); }
+    } catch (e) { notify.error(e.message); }
   }
 
   /* ---------------------------------------------------------------------
@@ -481,6 +478,7 @@
             if (o.status === "DRAFT" || o.status === "CONFIRMED") {
               actions.push(el("button", { class: "danger", type: "button", onclick: () => cancelOrder(o.id) }, "Cancel"));
             }
+            actions.push(el("button", { class: "secondary", type: "button", onclick: () => openCharges(o) }, "₹ Charges"));
             return el("div", { class: "form-inline" }, actions);
           } },
       ],
@@ -488,6 +486,52 @@
       searchPlaceholder: "Search orders — number, party, status…",
       emptyText: "No orders yet — click “+ New Order” to create the first one.",
     });
+  }
+
+  /** Additional charges booked against an order — transport, customs, labour,
+   *  washing, printing, etc. Entered right here from the orders list, no
+   *  separate screen. */
+  async function openCharges(o) {
+    const listBox = el("div", { class: "muted" }, "Loading…");
+    const st = { charge_type: "", amount: "", remarks: "" };
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    async function refresh() {
+      try {
+        const charges = await fetchAll(`/store/additional-charges/?order=${o.id}`);
+        listBox.innerHTML = "";
+        if (!charges.length) { listBox.appendChild(el("p", { class: "muted" }, "No additional charges yet.")); return; }
+        const total = charges.reduce((s, c) => s + Number(c.amount || 0), 0);
+        const table = el("table", { class: "data-table" });
+        table.appendChild(el("thead", {}, el("tr", {}, ["Type", "Amount", "Remarks", ""].map(h => el("th", {}, h)))));
+        table.appendChild(el("tbody", {}, charges.map(c => el("tr", {}, [
+          el("td", {}, c.charge_type_display || c.charge_type),
+          el("td", {}, fmtMoney(c.amount)),
+          el("td", {}, c.remarks || "—"),
+          el("td", {}, el("button", { class: "secondary", type: "button", onclick: async () => { try { await apiDelete(`/store/additional-charges/${c.id}/`); refresh(); } catch (e) { notify.error(e.message); } } }, "✕")),
+        ]))));
+        listBox.appendChild(table);
+        listBox.appendChild(el("div", { style: "text-align:right;font-weight:700;margin-top:0.4rem;color:var(--brand);" }, `Total charges: ${fmtMoney(total)}`));
+      } catch (e) { listBox.innerHTML = `<p class="error-msg">${e.message}</p>`; }
+    }
+    const typeSel = selectEl({ onchange: e => st.charge_type = e.target.value }, ORDER_CHARGE_TYPES, "", "Charge type");
+    const amtInput = numberInput(st.amount, v => st.amount = v, { min: "0", step: "0.01", placeholder: "amount" });
+    const remInput = el("input", { type: "text", placeholder: "remarks (optional)", oninput: e => st.remarks = e.target.value });
+    const addBtn = el("button", { type: "button", onclick: async () => {
+      err.style.display = "none";
+      if (!st.charge_type || !st.amount || Number(st.amount) <= 0) { err.textContent = "Pick a charge type and a positive amount."; err.style.display = "block"; return; }
+      try {
+        await apiPost("/store/additional-charges/", { order: o.id, charge_type: st.charge_type, amount: Number(st.amount), remarks: st.remarks || "" });
+        st.amount = ""; amtInput.value = ""; st.remarks = ""; remInput.value = "";
+        notify.success("Charge added."); refresh();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    } }, "Add Charge");
+    showCrudModal(`₹ Additional Charges — ${o.order_number}`, [
+      err,
+      el("div", { class: "form-inline", style: "align-items:flex-end;" }, [field("Type", typeSel), field("Amount", amtInput), field("Remarks", remInput), addBtn]),
+      el("div", { class: "section-title" }, "Charges on this order"),
+      listBox,
+    ], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+    refresh();
   }
 
   async function viewOrder(id) {
@@ -530,7 +574,7 @@
   }
   async function confirmOrder(id) {
     try { await apiPost(`/orders/${id}/confirm/`, {}); await refreshOrders(); }
-    catch (e) { alert("Error: " + e.message); }
+    catch (e) { notify.error(e.message); }
   }
   async function cancelOrder(id) {
     if (!(await showConfirm("Cancel this order? This can't be undone.", { title: "Cancel order", tone: "danger", confirmText: "Yes, cancel" }))) return;

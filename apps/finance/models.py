@@ -129,6 +129,54 @@ class PurchaseOrderItem(TimeStampedModel):
         return f"{self.item_name} x{self.quantity}"
 
 
+class CustomerInvoice(TimeStampedModel):
+    """A sales invoice raised manually to a customer for a (usually dispatched)
+    order -- created by Accounts, like a quotation. Separate from the vendor
+    `Invoice` (which is auto-generated from purchases)."""
+
+    class PaymentStatus(models.TextChoices):
+        UNPAID = "UNPAID", "Unpaid"
+        PARTIALLY_PAID = "PARTIALLY_PAID", "Partially Paid"
+        PAID = "PAID", "Paid"
+
+    invoice_number = models.CharField(max_length=20, unique=True, blank=True)
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="customer_invoices")
+    invoice_date = models.DateField()
+    amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0"))])
+    paid_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    payment_status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
+    due_date = models.DateField(null=True, blank=True)
+    remarks = models.TextField(blank=True)
+    created_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="customer_invoices_created")
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    @property
+    def due_amount(self):
+        return self.amount - self.paid_amount
+
+    def save(self, *args, **kwargs):
+        if not self.invoice_number:
+            last = CustomerInvoice.objects.order_by("-id").first()
+            try:
+                nxt = int(last.invoice_number.split("-")[1]) + 1 if last and last.invoice_number else 2001
+            except (ValueError, IndexError):
+                nxt = 2001
+            self.invoice_number = f"CINV-{nxt}"
+        # keep status in sync with paid amount
+        if self.paid_amount <= 0:
+            self.payment_status = self.PaymentStatus.UNPAID
+        elif self.paid_amount >= self.amount:
+            self.payment_status = self.PaymentStatus.PAID
+        else:
+            self.payment_status = self.PaymentStatus.PARTIALLY_PAID
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.invoice_number} — {self.order_id}"
+
+
 class Invoice(TimeStampedModel):
     class PaymentStatus(models.TextChoices):
         UNPAID = "UNPAID", "Unpaid"
@@ -201,17 +249,33 @@ class PaymentRecord(TimeStampedModel):
 
 
 class IncomeRecord(TimeStampedModel):
-    """Client-side money IN: advance payments, final payments, other income."""
+    """Client-side money IN: advance payments, final payments, other income.
+    Payments recorded against a CustomerInvoice auto-create one of these (see
+    finance.views.CustomerInvoiceViewSet.record_payment), so every income
+    figure across the system -- dashboard, party ledger, order P&L and the
+    sales report -- reads from this single source of truth."""
 
     class IncomeType(models.TextChoices):
         ADVANCE = "ADVANCE", "Advance Payment"
         FINAL = "FINAL", "Final Payment"
         OTHER = "OTHER", "Other Income"
 
+    class PaymentMethod(models.TextChoices):
+        CASH = "CASH", "Cash"
+        BANK_TRANSFER = "BANK_TRANSFER", "Bank Transfer"
+        CHEQUE = "CHEQUE", "Cheque"
+        ONLINE = "ONLINE", "Online"
+
     order = models.ForeignKey(Order, on_delete=models.SET_NULL, null=True, blank=True, related_name="income_records")
+    customer_invoice = models.ForeignKey(
+        "CustomerInvoice", on_delete=models.SET_NULL, null=True, blank=True, related_name="income_records",
+        help_text="The sales invoice this payment was recorded against (audit link).",
+    )
     income_type = models.CharField(max_length=20, choices=IncomeType.choices)
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0"))])
     received_date = models.DateField()
+    payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices, blank=True)
+    reference = models.CharField(max_length=100, blank=True, help_text="Cheque/transaction/UTR number for the audit trail.")
     remarks = models.TextField(blank=True)
     recorded_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="income_records")
 

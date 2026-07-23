@@ -37,15 +37,15 @@ from apps.master_data.models import (
     Party, Product, ProductComponent, Color, Size, FabricType, Vendor, Accessory,
 )
 from apps.store.models import (
-    FabricStock, StockTransaction, AccessoryStock, AccessoryStockTransaction, Unit, FinishedGoodsReceipt,
+    FabricStock, StockTransaction, AccessoryStock, AccessoryStockTransaction, Unit, FinishedGoodsReceipt, OrderAdditionalCharge,
 )
 from apps.orders.models import Order, OrderItem, OrderItemColor, OrderItemColorSize
 from apps.finance.models import (
-    PurchaseOrder, PurchaseOrderItem, Invoice, PaymentRecord, IncomeRecord, ExpenseRecord, Quotation,
+    PurchaseOrder, PurchaseOrderItem, Invoice, PaymentRecord, IncomeRecord, ExpenseRecord, Quotation, CustomerInvoice,
 )
 from apps.finance import services as finance_services
 from apps.cutting.models import CuttingOrder, CuttingPiece, Bundle, Marker
-from apps.operators.models import Operator, OperatorRate, BundleAssignment, OperatorIncome
+from apps.operators.models import Operator, BundleAssignment, OperatorIncome
 from apps.operators.services import assignment_labor_cost, order_piece_rate
 from apps.production.models import (
     BundleReceipt, ProductionQualityCheck, AccessoryIssue, BundleAccessoryIssue, OperatorAccessoryIssue, ProcessDispatch,
@@ -68,10 +68,10 @@ class Command(BaseCommand):
     def wipe(self):
         for model in [
             ActivityLog, PasswordResetRequest, OperatorAccessoryIssue, ProcessDispatch,
-            Quotation, PaymentRecord, Invoice, PurchaseOrderItem, PurchaseOrder, IncomeRecord, ExpenseRecord,
+            CustomerInvoice, OrderAdditionalCharge, Quotation, PaymentRecord, Invoice, PurchaseOrderItem, PurchaseOrder, IncomeRecord, ExpenseRecord,
             FinishedGoodsReceipt, Dispatch, Packing, FinishingQualityCheck, FinishingOperation, FinishingReceipt,
             ProductionQualityCheck, BundleReceipt, BundleAccessoryIssue, AccessoryIssue,
-            OperatorIncome, BundleAssignment, OperatorRate, Operator,
+            OperatorIncome, BundleAssignment, Operator,
             Bundle, CuttingPiece, CuttingOrder, Marker,
             OrderItemColorSize, OrderItemColor, OrderItem, Order,
             StockTransaction, AccessoryStockTransaction, FabricStock, AccessoryStock,
@@ -446,7 +446,7 @@ class Command(BaseCommand):
                       cutting_instruction=sc.get("cutting_instruction", ""))
         order.save()
         item = OrderItem.objects.create(order=order, product=product, fabric_type=fabric, approved_average=avg,
-                                        price_per_piece=D(sc["rate"]), inner_required=sc.get("inner", False),
+                                        inner_required=sc.get("inner", False),
                                         fusing_required=sc.get("fusing", False), resting_needed=sc.get("resting", False))
         # Per-colour "use half roll": demo it on the first colour whenever the
         # order carries a half-roll cutting instruction.
@@ -617,7 +617,7 @@ class Command(BaseCommand):
             status = "RETURNED" if is_pending else "QUALITY_CHECKED"
             completion = None if is_pending else min(order_date + timedelta(days=6 + idx % 4), today)
             BundleAssignment.objects.create(
-                bundle=b, operator=op, issued_quantity=issued,
+                bundle=b, operator=op, issued_quantity=issued, rate_per_piece=D(sc["rate"]),
                 returned_quantity=(returned if (returned != issued or not is_pending) else returned),
                 defects=defects, defect_reason=defect_reason,
                 quality_check_passed=(None if is_pending else True), status=status, completion_date=completion,
@@ -650,21 +650,46 @@ class Command(BaseCommand):
         if sc["product"] in ("polo", "cargo"):
             procs.append(("EMBROIDERY", "5.00", max(1, accepted_total // 150)))
         procs.append(("FINISHING", "2.50", accepted_total // 300))
+        # Orders still AT the finishing stage keep their FINISHING hand-off SENT
+        # (pending receipt) so they appear on Finishing > Receive from Production;
+        # dispatched orders have already been received back and QC'd.
+        pending_receipt = (stage == STAGE_RANK["finishing"])
         for dept, cpp, loss in procs:
             recv = accepted_total - loss
+            hold = (dept == "FINISHING" and pending_receipt)
             ProcessDispatch.objects.create(
                 order=order, department=dept, quantity_sent=accepted_total, sent_date=order_date + timedelta(days=11),
-                sent_by=ctx["prod"], quantity_received=recv, received_date=order_date + timedelta(days=13),
-                received_by=ctx["finish"], is_outsourced=(dept != "FINISHING"),
-                cost=(D(cpp) * D(accepted_total)).quantize(D("0.01")), status="RECEIVED",
+                sent_by=ctx["prod"], quantity_received=(None if hold else recv),
+                received_date=(None if hold else order_date + timedelta(days=13)),
+                received_by=(None if hold else ctx["finish"]), is_outsourced=(dept != "FINISHING"),
+                cost=(D(cpp) * D(accepted_total)).quantize(D("0.01")), status=("SENT" if hold else "RECEIVED"),
                 remarks=f"{dept.title()} process")
 
-        # Finishing does QC only: pass / alter / fail.
+        if pending_receipt:
+            # Awaiting physical receipt in Finishing -> no QC / packing / dispatch yet.
+            self._advance_income(order, ctx, dispatched=False)
+            return
+
+        # Finishing does QC per colour + size: pass / alter / fail (with reasons).
         rejects = max(1, accepted_total // 130)
         altered = max(1, accepted_total // 90)
-        FinishingQualityCheck.objects.create(order=order, checked_by=ctx["finish"], quantity_checked=accepted_total,
-                                             quantity_passed=accepted_total - rejects - altered, quantity_altered=altered,
-                                             quantity_rejected=rejects, notes="Final AQL inspection")
+        passed_qc = accepted_total - rejects - altered
+        sizes_pool = [s for s in ["S", "M", "L", "XL"] if s in ctx["sizes"]] or ["M"]
+        combos = [(ctx["colors"][c[0]], ctx["sizes"].get(s)) for c in sc["colors"] for s in sizes_pool][:6]
+        if not combos:
+            combos = [(ctx["colors"][sc["colors"][0][0]], ctx["sizes"].get("M"))]
+        n = len(combos)
+        for i, (col, sz) in enumerate(combos):
+            share = (passed_qc // n) + (passed_qc % n if i == 0 else 0)
+            f = rejects if i == 0 else 0
+            a = altered if i == 1 or n == 1 else 0
+            FinishingQualityCheck.objects.create(
+                order=order, checked_by=ctx["finish"], color=col, size=sz,
+                quantity_checked=share + f + a, quantity_passed=share,
+                quantity_rejected=f, quantity_altered=a,
+                fail_reason=("Broken stitch / open seam" if f else ""),
+                alter_reason=("Loose seam — re-stitch" if a else ""),
+                notes="Final AQL inspection")
         passed = accepted_total - rejects
         Packing.objects.create(order=order, packed_by=ctx["finish"], quantity_packed=passed, carton_count=max(1, passed // 50))
 
@@ -672,9 +697,15 @@ class Command(BaseCommand):
             self._advance_income(order, ctx, dispatched=False)
             return
 
-        # --- 6. DISPATCH (+ delivery) ---
+        # --- 6. DISPATCH (+ delivery) with challan + size/colour breakdown ---
+        size_bd, color_bd = {}, {}
+        for cname, sizeqty in sc["colors"]:
+            color_bd[cname] = int(color_pieces.get(cname, 0))
+            for sname, val in sizeqty.items():
+                size_bd[sname] = size_bd.get(sname, 0) + int((val * sc["sets"]) if is_ratio else val)
         dispatch = Dispatch.objects.create(order=order, dispatched_by=ctx["finish"], dispatch_date=order_date + timedelta(days=14),
                                            status="DISPATCHED", quantity_dispatched=passed, carrier="Nepal Cargo Movers",
+                                           challan_number=f"CH-{order.order_number}", size_breakdown=size_bd, color_breakdown=color_bd,
                                            mode_of_transport="ROAD", transport_cost=D("4500"), tracking_number=f"TRK-{order.order_number}")
         if sc.get("delivered"):
             dispatch.status = "DELIVERED"; dispatch.delivery_date = order_date + timedelta(days=18)
@@ -686,6 +717,13 @@ class Command(BaseCommand):
             order=order, quantity=passed, dispatch_reference=dispatch.tracking_number,
             received_at=timezone.now(), received_by=ctx["store"],
             remarks="Auto-logged from dispatch.")
+        # A manual customer invoice (Accounts) + a couple of Store charges.
+        paid = order.total_order_amount if sc.get("pay") == "full" else (order.total_order_amount / 2 if sc.get("pay") == "partial" else D("0"))
+        CustomerInvoice.objects.create(order=order, invoice_date=order_date + timedelta(days=15),
+                                       amount=order.total_order_amount, paid_amount=paid.quantize(D("0.01")),
+                                       due_date=order_date + timedelta(days=45), created_by=ctx["accounts"], remarks="Sales invoice")
+        for ct, amt in [("TRANSPORT", "4500"), ("COURIER", "2000")]:
+            OrderAdditionalCharge.objects.create(order=order, charge_type=ct, amount=D(amt), created_by=ctx["store"], remarks="Seeded charge")
         self._advance_income(order, ctx, dispatched=True)
 
     # --------------------------------------------------- helpers

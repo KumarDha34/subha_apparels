@@ -24,6 +24,10 @@ class Party(TimeStampedModel):
         max_length=10, blank=True,
         help_text="Short prefix used in generated order codes, e.g. 'HU' for Huba. Auto-derived from name if left blank.",
     )
+    pan_vat = models.CharField(max_length=30, blank=True, verbose_name="PAN / VAT No.")
+    credit_terms = models.CharField(max_length=30, blank=True, help_text="e.g. NET 30, NET 15, Advance, COD.")
+    credit_limit = models.DecimalField(max_digits=14, decimal_places=2, default=0,
+                                       help_text="Maximum outstanding receivable allowed for this buyer.")
     is_active = models.BooleanField(default=True)
 
     def __str__(self):
@@ -45,12 +49,44 @@ class Product(TimeStampedModel):
     """Product / Style master. `code` is always system-generated:
     <first 2 letters of name>-<first 3 letters of current Nepali (BS)
     month>-<3-digit sequence, resets every BS month>, e.g. "TE-ASH-001"."""
+    class ProductType(models.TextChoices):
+        APPAREL = "Apparel", "Apparel"
+        KNITWEAR = "Knitwear", "Knitwear"
+        BOTTOMWEAR = "Bottomwear", "Bottomwear"
+        OUTERWEAR = "Outerwear", "Outerwear"
+        ACCESSORY = "Accessory", "Accessory"
+        OTHER = "Other", "Other"
+
     code = models.CharField(max_length=50, unique=True, blank=True)
     name = models.CharField(max_length=200)
+    product_type = models.CharField(
+        max_length=50, choices=ProductType.choices, default=ProductType.APPAREL, blank=True,
+        help_text="Broad classification of the style, e.g. Apparel.",
+    )
+    category = models.CharField(
+        max_length=100, blank=True,
+        help_text="Style category, e.g. T-Shirts, Hoodies, Cargos, Leggings.",
+    )
     description = models.TextField(blank=True)
+    fabric_types = models.ManyToManyField(
+        "FabricType", blank=True, related_name="products",
+        help_text="Fabric options this style can be made in (e.g. Pique, Single Jersey).",
+    )
+    image = models.ImageField(
+        upload_to="products/images/", blank=True, null=True,
+        help_text="Uploaded reference image of the style (optional).",
+    )
+    measurement_chart_file = models.FileField(
+        upload_to="products/charts/", blank=True, null=True,
+        help_text="Uploaded measurement-chart document, e.g. a PDF (optional).",
+    )
     image_url = models.URLField(
         max_length=500, blank=True,
-        help_text="Link to the style's reference image (front photo / tech-pack shot). Shown in the admin Product Gallery.",
+        help_text="Legacy image link — kept for older styles; new styles upload an image instead.",
+    )
+    measurement_chart_url = models.URLField(
+        max_length=500, blank=True,
+        help_text="Legacy measurement-chart link — kept for older styles; new styles upload a file instead.",
     )
     measurement_chart = models.JSONField(
         default=list, blank=True,

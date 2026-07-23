@@ -12,6 +12,22 @@ class ProcessDispatchSerializer(serializers.ModelSerializer):
     vendor_name = serializers.CharField(source="vendor.company_name", read_only=True, default=None)
     department_display = serializers.CharField(source="get_department_display", read_only=True)
     loss_quantity = serializers.IntegerField(read_only=True)
+    size_breakdown = serializers.SerializerMethodField()
+    color_breakdown = serializers.SerializerMethodField()
+
+    def _bd(self, obj):
+        from apps.operators.services import order_piece_breakdown
+        if not hasattr(self, "_bd_cache"):
+            self._bd_cache = {}
+        if obj.order_id not in self._bd_cache:
+            self._bd_cache[obj.order_id] = order_piece_breakdown(obj.order_id)
+        return self._bd_cache[obj.order_id]
+
+    def get_size_breakdown(self, obj):
+        return self._bd(obj)["by_size"]
+
+    def get_color_breakdown(self, obj):
+        return self._bd(obj)["by_color"]
 
     class Meta:
         model = ProcessDispatch
@@ -19,6 +35,7 @@ class ProcessDispatchSerializer(serializers.ModelSerializer):
             "id", "dispatch_number", "order", "order_number", "party_name", "department", "department_display",
             "quantity_sent", "sent_date", "sent_by", "quantity_received", "received_date", "received_by",
             "loss_reason", "loss_status", "loss_reviewed_by", "loss_reviewed_at", "loss_review_notes",
+            "size_breakdown", "color_breakdown",
             "is_outsourced", "vendor", "vendor_name", "cost", "loss_quantity", "status", "remarks",
             "created_at", "updated_at",
         ]

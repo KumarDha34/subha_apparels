@@ -2,7 +2,7 @@
 {% block title %}Products - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Products / Styles</h2>
-  <p class="page-subtitle">Product codes are generated automatically — first 2 letters of the name, the current Nepali month, and a sequence that resets every month (e.g. TE-ASH-001). Add a reference image URL and a size-wise measurement chart so Admin can see the full style spec.</p>
+  <p class="page-subtitle">Product codes are generated automatically — first 2 letters of the name, the current Nepali month, and a sequence that resets every month (e.g. TE-ASH-001). Set the type, category and fabric options, then use <strong>Files</strong> to upload a product image and a measurement-chart PDF (both optional). Open <strong>Overview</strong> for the full style spec.</p>
 
   <div id="panel"></div>
 {% endblock %}
@@ -11,6 +11,77 @@
 <script>
   Auth.guardPage(["MERCHANDISE"]);
   renderShell("merch-products", "Products");
+
+  // --- Upload optional image + measurement-chart PDF (multipart) ---
+  function openFiles(p, refresh) {
+    const imgInput = el("input", { type: "file", accept: "image/*" });
+    const pdfInput = el("input", { type: "file", accept: "application/pdf,.pdf" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const current = [];
+    if (p.image_display_url) current.push(el("div", { class: "muted", style: "margin:0.2rem 0;" }, [
+      "Current image: ", el("a", { href: p.image_display_url, target: "_blank", rel: "noopener" }, "view")]));
+    if (p.measurement_chart_display_url) current.push(el("div", { class: "muted", style: "margin:0.2rem 0;" }, [
+      "Current chart: ", el("a", { href: p.measurement_chart_display_url, target: "_blank", rel: "noopener" }, "view")]));
+
+    const save = async () => {
+      err.style.display = "none";
+      const fd = new FormData();
+      if (imgInput.files[0]) fd.append("image", imgInput.files[0]);
+      if (pdfInput.files[0]) fd.append("measurement_chart_file", pdfInput.files[0]);
+      // FormData has no public length; check the two inputs directly.
+      if (!imgInput.files[0] && !pdfInput.files[0]) {
+        err.textContent = "Choose an image and/or a PDF to upload."; err.style.display = "block"; return;
+      }
+      try {
+        await apiUpload(`/master/products/${p.id}/`, fd, "PATCH");
+        closeCrudModal(); notify.success("Files uploaded."); refresh();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`Upload Files — ${p.code} ${p.name}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, "Both files are optional. Uploading replaces any existing file."),
+      ...current, err,
+      field("Product Image (optional)", imgInput),
+      field("Measurement Chart — PDF (optional)", pdfInput),
+    ], [
+      el("button", { type: "button", onclick: save }, "Upload"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  // --- Product Overview modal — the full style spec at a glance ---
+  function overviewRow(label, valueNode) {
+    return el("tr", {}, [
+      el("th", { style: "text-align:left;padding:0.5rem 0.9rem;white-space:nowrap;vertical-align:top;color:var(--muted,#666);font-weight:600;" }, label),
+      el("td", { style: "padding:0.5rem 0.9rem;vertical-align:top;" }, valueNode),
+    ]);
+  }
+  function openOverview(p) {
+    const img = p.image_display_url
+      ? el("img", { src: p.image_display_url, style: "width:120px;height:120px;object-fit:cover;border-radius:10px;background:#faf7f5;border:1px solid var(--border,#eee);" })
+      : el("span", { class: "muted" }, "No image uploaded");
+    const chart = p.measurement_chart_display_url
+      ? el("a", { href: p.measurement_chart_display_url, target: "_blank", rel: "noopener" }, "📄 View measurement chart")
+      : ((p.measurement_chart || []).length
+          ? `Size chart — ${(p.measurement_chart || []).length} measurement row(s)`
+          : el("span", { class: "muted" }, "—"));
+    const fabrics = (p.fabric_type_names && p.fabric_type_names.length)
+      ? p.fabric_type_names.join(", ")
+      : el("span", { class: "muted" }, "—");
+    const table = el("table", { style: "width:100%;border-collapse:collapse;" }, el("tbody", {}, [
+      overviewRow("Product Name", p.name || "—"),
+      overviewRow("Product Code", `${p.code} (auto-generated)`),
+      overviewRow("Product Type", p.product_type || "—"),
+      overviewRow("Category", p.category || el("span", { class: "muted" }, "—")),
+      overviewRow("Image", img),
+      overviewRow("Measurement Chart", chart),
+      overviewRow("Fabric Type Options", fabrics),
+      overviewRow("Status", badge(p.is_active ? "Active" : "Inactive")),
+      p.description ? overviewRow("Description", p.description) : null,
+    ].filter(Boolean)));
+    showCrudModal(`Product Overview — ${p.code}`, [table], [
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close"),
+    ], { wide: true });
+  }
 
   // --- size-wise measurement chart editor (one line per measurement) ---
   function chartToText(chart) {
@@ -53,20 +124,27 @@
     title: "Products / Styles",
     endpoint: "/master/products/",
     columns: [
-      { render: p => (p.image_url
-          ? el("img", { src: p.image_url, style: "width:44px;height:44px;object-fit:cover;border-radius:8px;background:#faf7f5;" })
+      { render: p => (p.image_display_url
+          ? el("img", { src: p.image_display_url, style: "width:44px;height:44px;object-fit:cover;border-radius:8px;background:#faf7f5;" })
           : el("span", { class: "muted" }, "—")), label: "Image", sortable: false },
       { key: "code", label: "Code" },
       { key: "name", label: "Name" },
-      { render: p => `${(p.measurement_chart || []).length} rows`, label: "Measurements" },
+      { key: "product_type", label: "Type", render: p => p.product_type || "—" },
+      { key: "category", label: "Category", render: p => p.category || "—" },
+      { label: "Fabrics", sortable: false, render: p => (p.fabric_type_names && p.fabric_type_names.length ? p.fabric_type_names.join(", ") : "—") },
       { render: p => badge(p.is_active ? "Active" : "Inactive"), label: "Status" },
-      { render: p => el("button", { class: "secondary", type: "button", onclick: () => openMeasurements(p, panel.refresh) }, "Measurements"),
-        label: "Chart", sortable: false },
+      { label: "Details", sortable: false, render: p => el("div", { class: "form-inline" }, [
+          el("button", { type: "button", onclick: () => openOverview(p) }, "Overview"),
+          el("button", { class: "secondary", type: "button", onclick: () => openFiles(p, panel.refresh) }, "Files"),
+          el("button", { class: "secondary", type: "button", onclick: () => openMeasurements(p, panel.refresh) }, "Measurements"),
+        ]) },
     ],
     fields: [
       { name: "name", label: "Product Name", required: true },
+      { name: "product_type", label: "Product Type", type: "select", choices: ["Apparel", "Knitwear", "Bottomwear", "Outerwear", "Accessory", "Other"] },
+      { name: "category", label: "Category (e.g. T-Shirts)", type: "text" },
+      { name: "fabric_types", label: "Fabric Type Options", type: "multiselect", optionsEndpoint: "/master/fabric-types/", optionsLabel: "name" },
       { name: "description", label: "Description", type: "textarea" },
-      { name: "image_url", label: "Reference Image URL", type: "text" },
     ],
     editable: true,
   });

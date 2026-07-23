@@ -76,7 +76,7 @@
     const operator = document.getElementById("income-operator").value;
     const period_start = document.getElementById("income-start").value;
     const period_end = document.getElementById("income-end").value;
-    if (!operator || !period_start || !period_end) return alert("Fill all fields.");
+    if (!operator || !period_start || !period_end) return notify.warning("Please fill all fields.");
     try {
       const income = await apiPost("/operators/income/calculate/", { operator: Number(operator), period_start, period_end });
       const wrap = document.getElementById("income-result");
@@ -88,21 +88,21 @@
         ["Status", badge(income.payment_status)],
       ]));
       await refreshIncomeTable();
-    } catch (e) { alert("Error: " + e.message); }
+    } catch (e) { notify.error(e.message); }
   }
 
   async function payFull(id) {
     try { await apiPost(`/operators/income/${id}/mark_paid/`, {}); await refreshIncomeTable(); }
-    catch (e) { alert("Error: " + e.message); }
+    catch (e) { notify.error(e.message); }
   }
 
   async function payPartial(id, remaining) {
     const raw = prompt(`Enter amount to pay (remaining: ${remaining}):`);
     if (raw === null) return;
     const amount = Number(raw);
-    if (!amount || amount <= 0) return alert("Enter a valid amount.");
+    if (!amount || amount <= 0) return notify.warning("Enter a valid amount.");
     try { await apiPost(`/operators/income/${id}/mark_paid/`, { amount }); await refreshIncomeTable(); }
-    catch (e) { alert("Error: " + e.message); }
+    catch (e) { notify.error(e.message); }
   }
 
   async function refreshIncomeTable() {

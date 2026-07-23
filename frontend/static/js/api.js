@@ -27,6 +27,21 @@ const ROLE_DASHBOARD = {
   OPERATOR: "/dashboard/operator/",
 };
 
+/* Real-world post-order additional charges (Store books most of these).
+   Shared by the Store "Additional Charges" page and the Merchandising order
+   list so the two never drift. Values must match OrderAdditionalCharge.ChargeType. */
+const ORDER_CHARGE_TYPES = [
+  { value: "TRANSPORT", label: "Transport / Freight" },
+  { value: "COURIER", label: "Courier" },
+  { value: "CUSTOMS", label: "Customs Clearance" },
+  { value: "STORAGE", label: "Storage / Warehousing" },
+  { value: "SAMPLE", label: "Sample Development" },
+  { value: "TESTING", label: "Testing / Inspection" },
+  { value: "PENALTY", label: "Late Delivery Penalty" },
+  { value: "LABOUR", label: "Labour / Handling" },
+  { value: "OTHER", label: "Other" },
+];
+
 /* Full sidebar menu. Admin sees every item; everyone else sees only the
    item(s) matching their role (plus nothing else - keeps each dashboard
    focused on that department's job). */
@@ -73,6 +88,7 @@ const MENU = [
   // single Stock page (issue straight from a stock row) -- no separate pages.
   { key: "store-stock", label: "Stock", href: "/store/stock/", icon: "\u{1F4CB}", roles: ["ADMIN", "STORE_MANAGER"], section: "Store" },
   { key: "store-finished-goods", label: "Finished Goods", href: "/store/finished-goods/", icon: "\u{1F4E6}", roles: ["ADMIN", "STORE_MANAGER"], section: "Store" },
+  { key: "store-additional-charges", label: "Additional Charges", href: "/store/additional-charges/", icon: "\u{1F4B8}", roles: ["ADMIN", "STORE_MANAGER"], section: "Store" },
   { key: "store-vendors", label: "Vendors", href: "/store/vendors/", icon: "\u{1F91D}", roles: ["ADMIN", "STORE_MANAGER"], section: "Store" },
   { key: "cutting", label: "Cutting Dashboard", href: "/dashboard/cutting/", icon: "\u{2702}\u{FE0F}", roles: ["ADMIN", "CUTTING_SUPERVISOR"], section: "Cutting" },
   { key: "cutting-orders-list", label: "Cutting Orders", href: "/cutting/orders/", icon: "\u{1F4CB}", roles: ["ADMIN", "CUTTING_SUPERVISOR"], section: "Cutting" },
@@ -84,15 +100,18 @@ const MENU = [
   { key: "production-operators", label: "Operators", href: "/production/operators/", icon: "\u{1F465}", roles: ["ADMIN", "PRODUCTION_SUPERVISOR"], section: "Production" },
   { key: "production-performance", label: "Performance & Income", href: "/production/performance/", icon: "\u{1F4C8}", roles: ["ADMIN", "PRODUCTION_SUPERVISOR"], section: "Production" },
   { key: "finishing", label: "Finishing & Dispatch", href: "/dashboard/finishing/", icon: "\u{1F4E6}", roles: ["ADMIN", "FINISHING_SUPERVISOR"], section: "Finishing" },
+  { key: "finishing-receive", label: "Receive from Production", href: "/finishing/receive/", icon: "\u{2B07}\u{FE0F}", roles: ["ADMIN", "FINISHING_SUPERVISOR"], section: "Finishing" },
   { key: "finishing-operations", label: "Quality Check", href: "/finishing/operations/", icon: "\u{2705}", roles: ["ADMIN", "FINISHING_SUPERVISOR"], section: "Finishing" },
   { key: "finishing-dispatch", label: "Dispatch", href: "/finishing/dispatch/", icon: "\u{1F69A}", roles: ["ADMIN", "FINISHING_SUPERVISOR"], section: "Finishing" },
   { key: "accounts-dashboard", label: "Dashboard", href: "/dashboard/accounts/", icon: "\u{1F4B0}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
   { key: "report-quotations", label: "Quotations", href: "/accounts/quotations/", icon: "\u{1F4C4}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
-  { key: "accounts-payments", label: "Invoices", href: "/accounts/payments/", icon: "\u{1F9FE}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
+  { key: "accounts-customer-invoices", label: "Customer Invoices", href: "/accounts/customer-invoices/", icon: "\u{1F9FE}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
+  { key: "accounts-payments", label: "Supplier Bills (Pay)", href: "/accounts/payments/", icon: "\u{1F4B3}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
   { key: "report-party-ledger", label: "Party Ledger", href: "/reports/?key=party-ledger", icon: "\u{1F4D2}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
   { key: "accounts-purchase-orders", label: "Purchase Bills", href: "/accounts/purchase-orders/", icon: "\u{1F4E5}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
   { key: "report-supplier-ledger", label: "Supplier Ledger", href: "/reports/?key=supplier-ledger", icon: "\u{1F4D5}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
   { key: "report-sales-pnl-cash", label: "Sales, P&L & Cash", href: "/reports/?key=sales-pnl-cash", icon: "\u{1F4B0}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
+  { key: "accounts-operator-payments", label: "Operator Payments", href: "/accounts/operator-payments/", icon: "\u{1F9D1}\u{200D}\u{1F3ED}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
   { key: "accounts-income-expenses", label: "Income & Expenses", href: "/accounts/income-expenses/", icon: "\u{1F4C8}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
   { key: "accounts-order-pnl", label: "Order P&L", href: "/accounts/order-pnl/", icon: "\u{1F4CA}", roles: ["ADMIN", "ACCOUNTS"], section: "Accounts" },
   { key: "operator", label: "My Work", href: "/dashboard/operator/", icon: "\u{1F9D1}\u{200D}\u{1F3ED}", roles: ["ADMIN", "OPERATOR"], section: "Operator" },
@@ -201,6 +220,24 @@ async function apiDelete(path) {
   const res = await apiFetch(path, { method: "DELETE" });
   if (!res.ok && res.status !== 204) throw new Error(await extractError(res));
   return true;
+}
+/** Multipart upload (files + fields). Sends FormData, so we must NOT set a
+ *  Content-Type header (the browser adds the multipart boundary itself).
+ *  Reuses the JWT + refresh flow; kept separate from the JSON apiFetch path. */
+async function apiUpload(path, formData, method = "PATCH") {
+  const doFetch = () => fetch(`${API_BASE}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${Auth.getAccess()}` },
+    body: formData,
+  });
+  let res = await doFetch();
+  if (res.status === 401) {
+    const refreshed = await refreshToken();
+    if (refreshed) res = await doFetch();
+    else { Auth.logout(); return; }
+  }
+  if (!res.ok) throw new Error(await extractError(res));
+  return res.status === 204 ? {} : res.json();
 }
 async function extractError(res) {
   try {
@@ -768,7 +805,7 @@ function renderOrderSummary(order) {
     return el("div", { class: "subcard level-color" }, [
       el("div", { class: "subcard-header" }, [el("span", { class: "subcard-title" }, `${item.product_code} — ${item.product_name}`)]),
       el("div", { class: "muted", style: "margin-bottom:0.3rem;" },
-        `${item.fabric_type_name} · Operator rate: ${item.price_per_piece != null ? fmtMoney(item.price_per_piece) + "/pc" : "—"} · Inner: ${item.inner_required ? "Yes" : "No"} · Fusing: ${item.fusing_required ? "Yes" : "No"} · Resting: ${item.resting_needed ? "Yes" : "No"}`),
+        `${item.fabric_type_name} · Inner: ${item.inner_required ? "Yes" : "No"} · Fusing: ${item.fusing_required ? "Yes" : "No"} · Resting: ${item.resting_needed ? "Yes" : "No"}`),
       ...colorLines,
     ]);
   });
@@ -819,7 +856,7 @@ function renderPOSummary(po) {
 
 /** Admin/supervisor "operator profile" modal: personal details, lifetime
  *  production & efficiency, and a day-by-day breakdown of completed pieces
- *  and the money they earned (paid at the order's price_per_piece). Opened
+ *  and the money they earned (paid at the assignment's rate_per_piece). Opened
  *  by clicking an operator's name. */
 async function showOperatorReport(operatorId, operatorName) {
   const closeBtn = () => el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close");

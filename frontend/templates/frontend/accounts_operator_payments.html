@@ -1,0 +1,88 @@
+{% extends "frontend/base.html" %}
+{% block title %}Operator Payments - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Operator Payments</h2>
+  <p class="page-subtitle">Pay operators their stitching wages — earned = the order's price/piece × pieces returned. Generate a wage statement for a period, then record the payment.</p>
+  <div class="grid grid-4" id="stats" style="margin-bottom:1rem;"></div>
+  <div class="card">
+    <h3>➕ Generate Wage Statement</h3>
+    <div id="gen-form"></div>
+  </div>
+  <div id="list-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ACCOUNTS"]);
+  renderShell("accounts-operator-payments", "Operator Payments");
+
+  let OPERATORS = [];
+
+  function renderGen() {
+    const wrap = document.getElementById("gen-form"); wrap.innerHTML = "";
+    const st = { operator: "", start: "", end: "" };
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const form = el("div", { class: "form-inline" }, [
+      field("Operator", selectEl({ onchange: e => st.operator = e.target.value }, OPERATORS.map(o => ({ value: o.id, label: o.name })), "", "Select operator")),
+      field("Period Start", el("input", { type: "date", class: "allow-past", oninput: e => st.start = e.target.value })),
+      field("Period End", el("input", { type: "date", class: "allow-past", oninput: e => st.end = e.target.value })),
+      el("button", { type: "button", onclick: async () => {
+        err.style.display = "none";
+        if (!st.operator || !st.start || !st.end) { err.textContent = "Select an operator and a period."; err.style.display = "block"; return; }
+        try { await apiPost("/operators/income/calculate/", { operator: Number(st.operator), period_start: st.start, period_end: st.end }); notify.success("Wage statement generated."); await load(); }
+        catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Generate"),
+    ]);
+    wrap.append(err, form);
+  }
+
+  function openPay(inc) {
+    const remaining = Number(inc.total_income) - Number(inc.paid_amount);
+    const amt = numberInput(String(remaining), () => {}, { min: "0", step: "0.01" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`Pay ${inc.operator_name}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Earned ${fmtMoney(inc.total_income)}, paid ${fmtMoney(inc.paid_amount)}, remaining ${fmtMoney(remaining)}.`),
+      err, field("Amount to pay", amt),
+    ], [
+      el("button", { type: "button", onclick: async () => {
+        try { await apiPost(`/operators/income/${inc.id}/mark_paid/`, { amount: Number(amt.value || 0) }); closeCrudModal(); notify.success("Payment recorded."); await load(); }
+        catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Pay"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  async function load() {
+    let incomes;
+    try { incomes = await fetchAll("/operators/income/"); }
+    catch (e) { document.getElementById("list-wrap").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    const earned = incomes.reduce((s, i) => s + Number(i.total_income || 0), 0);
+    const paid = incomes.reduce((s, i) => s + Number(i.paid_amount || 0), 0);
+    const stats = document.getElementById("stats"); stats.innerHTML = "";
+    [["Total Earned", earned], ["Total Paid", paid], ["Pending", earned - paid], ["Statements", incomes.length]].forEach(([l, v], idx) =>
+      stats.appendChild(el("div", { class: "card stat" }, [el("div", { class: "value" }, idx === 3 ? String(v) : fmtMoney(v)), el("div", { class: "label" }, l)])));
+    const wrap = document.getElementById("list-wrap"); wrap.innerHTML = "";
+    const body = el("div", {}); wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Wage Statements"), body]));
+    dataTable(body, {
+      columns: [
+        { key: "operator_name", label: "Operator" },
+        { label: "Period", value: i => i.period_end, render: i => `${i.period_start} — ${i.period_end}` },
+        { label: "Pieces", value: i => Number(i.pieces_completed) },
+        { label: "Earned", value: i => Number(i.total_income), render: i => fmtMoney(i.total_income) },
+        { label: "Paid", value: i => Number(i.paid_amount), render: i => fmtMoney(i.paid_amount) },
+        { label: "Pending", value: i => Number(i.total_income) - Number(i.paid_amount), render: i => fmtMoney(Number(i.total_income) - Number(i.paid_amount)) },
+        { label: "Status", value: i => i.payment_status, render: i => badge(i.payment_status) },
+        { label: "Action", sortable: false, render: i => (Number(i.total_income) - Number(i.paid_amount) > 0
+            ? el("button", { class: "secondary", type: "button", onclick: () => openPay(i) }, "Pay") : "—") },
+      ], rows: incomes, pageSize: 12, initialSort: { key: "period_end", dir: "desc" },
+      searchPlaceholder: "Search — operator…", emptyText: "No wage statements yet — generate one above.",
+    });
+  }
+
+  (async function init() {
+    OPERATORS = await fetchAll("/operators/operators/?is_active=true");
+    renderGen();
+    await load();
+  })();
+</script>
+{% endblock %}

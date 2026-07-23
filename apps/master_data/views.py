@@ -55,7 +55,8 @@ class PartyViewSet(BaseMasterViewSet):
         orders = Order.objects.filter(party=party)
         by_status = {row["status"]: row["c"] for row in orders.values("status").annotate(c=Count("id"))}
         total_orders = orders.count()
-        completed = by_status.get("DISPATCHED", 0)
+        # "Completed" = the goods have left the floor: dispatched or in financial closure.
+        completed = by_status.get("DISPATCHED", 0) + by_status.get("INVOICED", 0) + by_status.get("PAID", 0)
         cancelled = by_status.get("CANCELLED", 0)
         pending = total_orders - completed - cancelled
 
@@ -83,9 +84,9 @@ class PartyViewSet(BaseMasterViewSet):
 
 
 class ProductViewSet(BaseMasterViewSet):
-    queryset = Product.objects.all().order_by("code")
+    queryset = Product.objects.prefetch_related("fabric_types").all().order_by("code")
     serializer_class = ProductSerializer
-    search_fields = ["code", "name"]
+    search_fields = ["code", "name", "category", "product_type"]
 
 
 class ProductComponentViewSet(BaseMasterViewSet):

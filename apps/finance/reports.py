@@ -53,7 +53,7 @@ def _product_rows():
         rows.append({"code": p.code, "name": p.name, "description": p.description or "—",
                      "orders": order_count, "ordered": int(ordered), "produced": int(produced),
                      "remaining": max(int(ordered) - int(produced), 0),
-                     "image_url": p.image_url or "", "measurements": p.measurement_chart or [],
+                     "image_url": (p.image.url if p.image else p.image_url) or "", "measurements": p.measurement_chart or [],
                      "status": "ACTIVE" if p.is_active else "INACTIVE"})
     return rows
 
@@ -264,22 +264,30 @@ def r_dispatch_balance():
 def r_party_ledger():
     from apps.master_data.models import Party
     from apps.orders.models import Order
-    from apps.finance.models import IncomeRecord
+    from apps.finance.models import IncomeRecord, CustomerInvoice
     detail_cols = [{"key": "order", "label": "Order"}, {"key": "date", "label": "Date"},
                    {"key": "value", "label": "Order Value", "type": "money"}, {"key": "received", "label": "Received", "type": "money"},
                    {"key": "outstanding", "label": "Outstanding", "type": "money"}, {"key": "status", "label": "Status"}]
+
+    def order_billed(o):
+        # The billed value is the sales invoice(s) raised for the order; fall
+        # back to the order's own amount when it hasn't been invoiced yet.
+        inv = CustomerInvoice.objects.filter(order=o).aggregate(s=Sum("amount"))["s"]
+        return _m(inv) if inv else _m(o.total_order_amount)
+
     rows = []
     for p in Party.objects.all():
         orders = Order.objects.filter(party=p).exclude(status="CANCELLED").order_by("-order_date")
-        value = orders.aggregate(s=Sum("total_order_amount"))["s"] or 0
         received = IncomeRecord.objects.filter(order__party=p).aggregate(s=Sum("amount"))["s"] or 0
-        detail = []
+        detail, value = [], 0.0
         for o in orders:
+            o_value = order_billed(o)
+            value += o_value
             recv = IncomeRecord.objects.filter(order=o).aggregate(s=Sum("amount"))["s"] or 0
-            detail.append({"order": o.order_number, "date": str(o.order_date), "value": _m(o.total_order_amount),
-                           "received": _m(recv), "outstanding": max(_m(o.total_order_amount) - _m(recv), 0), "status": o.status})
-        rows.append({"party": p.name, "orders": orders.count(), "value": _m(value),
-                     "received": _m(received), "outstanding": max(_m(value) - _m(received), 0),
+            detail.append({"order": o.order_number, "date": str(o.order_date), "value": o_value,
+                           "received": _m(recv), "outstanding": max(o_value - _m(recv), 0), "status": o.status})
+        rows.append({"id": p.id, "party": p.name, "orders": orders.count(), "value": value,
+                     "received": _m(received), "outstanding": max(value - _m(received), 0),
                      "detail": detail, "detail_title": f"Orders for {p.name}", "detail_columns": detail_cols})
     return dict(title="Party Ledger", description="Per-buyer order value, money received and outstanding receivable. Click Details for every order.",
                 summary=[{"label": "Total Receivable", "value": sum(r["outstanding"] for r in rows), "kind": "danger"}],

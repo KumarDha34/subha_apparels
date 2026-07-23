@@ -1,0 +1,94 @@
+{% extends "frontend/base.html" %}
+{% block title %}Additional Charges - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Additional Charges</h2>
+  <p class="page-subtitle">Book extra, non-material costs against an order as they come up — transport, courier, customs, storage, sample development, testing, late-delivery penalties or handling labour. These feed straight into the order's cost and P&amp;L. Store can add them any time after the order is created.</p>
+
+  <div id="form-wrap"></div>
+  <div id="list-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["STORE_MANAGER"]);
+  renderShell("store-additional-charges", "Additional Charges");
+
+  let ORDERS = [];
+  let state = { order: "", charge_type: "", amount: "", remarks: "" };
+
+  async function addCharge(err) {
+    err.style.display = "none";
+    if (!state.order) { err.textContent = "Select an order."; err.style.display = "block"; return; }
+    if (!state.charge_type) { err.textContent = "Pick a charge type."; err.style.display = "block"; return; }
+    if (!state.amount || Number(state.amount) <= 0) { err.textContent = "Enter a positive amount."; err.style.display = "block"; return; }
+    try {
+      await apiPost("/store/additional-charges/", {
+        order: Number(state.order), charge_type: state.charge_type,
+        amount: Number(state.amount), remarks: state.remarks || "",
+      });
+      notify.success("Charge added to the order.");
+      state.charge_type = ""; state.amount = ""; state.remarks = "";
+      await load();
+    } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+  }
+
+  function renderForm() {
+    const wrap = document.getElementById("form-wrap"); wrap.innerHTML = "";
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const form = el("div", { class: "form-inline" }, [
+      field("Order", selectEl({ onchange: e => { state.order = e.target.value; renderList(); } },
+        ORDERS.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name || ""}` })), state.order, "Select order")),
+      field("Charge Type", selectEl({ onchange: e => state.charge_type = e.target.value }, ORDER_CHARGE_TYPES, state.charge_type, "Charge type")),
+      field("Amount (Rs.)", numberInput(state.amount, v => state.amount = v, { min: "0", step: "0.01", placeholder: "amount" })),
+      field("Remarks", el("input", { type: "text", value: state.remarks, placeholder: "optional note", oninput: e => state.remarks = e.target.value })),
+    ]);
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "💸 Add a Charge to an Order"),
+      err, form,
+      el("div", { class: "form-inline", style: "margin-top:0.8rem;" }, [el("button", { type: "button", onclick: () => addCharge(err) }, "Add Charge")]),
+    ]));
+  }
+
+  async function renderList() {
+    const wrap = document.getElementById("list-wrap"); wrap.innerHTML = "";
+    const body = el("div", {});
+    const heading = state.order
+      ? `Charges on ${(ORDERS.find(o => String(o.id) === String(state.order)) || {}).order_number || "order"}`
+      : "All Additional Charges";
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, `🧾 ${heading}`), body]));
+    let charges;
+    try { charges = await fetchAll("/store/additional-charges/" + (state.order ? `?order=${state.order}` : "")); }
+    catch (e) { body.innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    if (!charges.length) { body.appendChild(el("p", { class: "muted" }, "No additional charges booked yet.")); return; }
+
+    dataTable(body, {
+      columns: [
+        { key: "order_number", label: "Order #" },
+        { key: "party_name", label: "Party", render: c => c.party_name || "—" },
+        { label: "Charge Type", value: c => c.charge_type_display || c.charge_type, render: c => c.charge_type_display || c.charge_type },
+        { label: "Amount", value: c => Number(c.amount), render: c => fmtMoney(c.amount) },
+        { key: "remarks", label: "Remarks", render: c => c.remarks || "—" },
+        { key: "created_at", label: "Added", render: c => (c.created_at || "").slice(0, 10) },
+        { label: "", sortable: false, render: c => el("button", { class: "secondary", type: "button", onclick: async () => {
+            const ok = await showConfirm(`Delete this ${c.charge_type_display || c.charge_type} charge of ${fmtMoney(c.amount)}?`);
+            if (!ok) return;
+            try { await apiDelete(`/store/additional-charges/${c.id}/`); notify.success("Charge removed."); await load(); }
+            catch (e) { notify.error(e.message); }
+          } }, "Delete") },
+      ], rows: charges, pageSize: 12, initialSort: { key: "created_at", dir: "desc" },
+      searchPlaceholder: "Search — order, party, type…", emptyText: "No additional charges.",
+    });
+    const total = charges.reduce((s, c) => s + Number(c.amount || 0), 0);
+    body.appendChild(el("div", { style: "text-align:right;font-weight:700;margin-top:0.5rem;color:var(--brand);" }, `Total: ${fmtMoney(total)}`));
+  }
+
+  async function load() {
+    try { ORDERS = (await fetchAll("/orders/")).filter(o => o.status !== "CANCELLED"); }
+    catch (e) { document.getElementById("form-wrap").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    renderForm();
+    await renderList();
+  }
+
+  load();
+</script>
+{% endblock %}

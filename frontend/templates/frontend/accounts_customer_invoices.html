@@ -1,0 +1,217 @@
+{% extends "frontend/base.html" %}
+{% block title %}Customer Invoices - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Customer Invoices</h2>
+  <p class="page-subtitle">Raise a sales invoice for a dispatched order. Pick the order — the dispatched quantity fills in automatically. Enter the selling rate per piece (pre-filled from the order when it has one) and the amount is calculated for you. Then set the dates and record payments.</p>
+  <div id="form-wrap"></div>
+  <div id="list-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ACCOUNTS"]);
+  renderShell("accounts-customer-invoices", "Customer Invoices");
+
+  let ORDERS = [];              // dispatched orders only
+  let state = blank();
+  function blank() {
+    return { order: "", quantity: 0, unit: 0, amount: 0, invoice_date: new Date().toISOString().slice(0, 10), due_date: "", remarks: "" };
+  }
+
+  function recompute() {
+    state.amount = Math.round((Number(state.quantity) || 0) * (Number(state.unit) || 0) * 100) / 100;
+  }
+
+  // On order select, auto-fill the dispatched quantity and pre-fill the rate
+  // per piece from the order value when it has one; the user can set/adjust it.
+  async function onOrder(id) {
+    state.order = id; state.quantity = 0; state.amount = 0; state.unit = 0;
+    if (id) {
+      try {
+        const [order, dispatches] = await Promise.all([apiGet(`/orders/${id}/`), fetchAll(`/finishing/dispatch/?order=${id}`)]);
+        const disp = dispatches.find(d => d.quantity_dispatched != null) || dispatches[0];
+        const dispatched = disp ? Number(disp.quantity_dispatched || 0) : 0;
+        let ordered = 0;
+        (order.items || []).forEach(it => (it.colors || []).forEach(c => (c.size_lines || []).forEach(sl => ordered += Number(sl.quantity || 0))));
+        if (!ordered) ordered = dispatched; // ratio orders carry no fixed qty
+        const total = Number(order.total_order_amount) || 0;
+        state.unit = ordered && total ? Math.round(total / ordered * 100) / 100 : 0;
+        state.quantity = dispatched;
+        recompute();
+      } catch (e) { notify.error(e.message); }
+    }
+    renderForm();
+  }
+
+  function renderForm() {
+    const wrap = document.getElementById("form-wrap"); wrap.innerHTML = "";
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+
+    // Live calculation line — updated in place so inputs never lose focus.
+    const calcLine = el("div", { class: "mode-banner mode-fixed", style: state.order ? "" : "display:none;" });
+    function paintCalc() {
+      calcLine.innerHTML = "";
+      calcLine.append(`${state.quantity || 0} pcs × `, el("strong", {}, fmtMoney(state.unit || 0)), " = ", el("strong", {}, fmtMoney(state.amount || 0)));
+    }
+    paintCalc();
+
+    const qtyInput = numberInput(state.quantity, v => { state.quantity = v; recompute(); paintCalc(); }, { min: "0", step: "1", placeholder: "dispatched qty" });
+    const rateInput = numberInput(state.unit, v => { state.unit = v; recompute(); paintCalc(); }, { min: "0", step: "0.01", placeholder: "selling rate per piece" });
+
+    const form = el("div", { class: "form-inline" }, [
+      field("Order (dispatched)", selectEl({ onchange: e => onOrder(e.target.value) }, ORDERS.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "Select order")),
+      field("Invoice Date", el("input", { type: "date", value: state.invoice_date, oninput: e => state.invoice_date = e.target.value })),
+      field("Due Date", el("input", { type: "date", class: "allow-past", value: state.due_date, oninput: e => state.due_date = e.target.value })),
+    ]);
+    const amountRow = el("div", { class: "form-inline", style: state.order ? "" : "display:none;" }, [
+      field("Quantity (pcs)", qtyInput),
+      field("Rate / Piece (Rs.)", rateInput),
+    ]);
+    const remarks = field("Remarks", el("input", { type: "text", value: state.remarks, oninput: e => state.remarks = e.target.value }));
+    const submit = async () => {
+      err.style.display = "none";
+      if (!state.order) { err.textContent = "Select a dispatched order."; err.style.display = "block"; return; }
+      if (!state.quantity || Number(state.quantity) <= 0) { err.textContent = "This order has no dispatched quantity to invoice yet."; err.style.display = "block"; return; }
+      if (!state.unit || Number(state.unit) <= 0) { err.textContent = "Enter the selling rate per piece — the order has no amount set."; err.style.display = "block"; return; }
+      recompute();
+      try {
+        const created = await apiPost("/accounts/customer-invoices/", {
+          order: Number(state.order), invoice_date: state.invoice_date, amount: state.amount,
+          due_date: state.due_date || null, remarks: state.remarks || `Dispatched ${state.quantity} pcs @ ${fmtMoney(state.unit)}`,
+        });
+        notify.success("Customer invoice created — opening printable invoice.");
+        if (created && created.id) printInvoice(created);
+        state = blank(); await load();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, "➕ New Customer Invoice"),
+      err, form, amountRow, calcLine, remarks,
+      el("div", { class: "form-inline", style: "margin-top:0.7rem;" }, [el("button", { type: "button", onclick: submit }, "Create Invoice")]),
+    ]));
+  }
+
+  function openPrintWindow(title, bodyHtml) {
+    const win = window.open("", "_blank", "width=820,height=940");
+    win.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>
+      body{font-family:Arial,Helvetica,sans-serif;padding:2rem;color:#111;}
+      table{width:100%;border-collapse:collapse;margin-top:1.1rem;} th,td{border:1px solid #999;padding:.55rem .8rem;text-align:left;}
+      th{background:#f0f0f0;} td.num,th.num{text-align:right;}
+      .status{margin-top:1.6rem;padding:.7rem 1rem;border:1px dashed #2e7d32;border-radius:8px;background:#f2fbf3;color:#1b5e20;font-weight:600;}
+      .sign{margin-top:2.6rem;display:grid;grid-template-columns:1fr 1fr;gap:2rem;} .sign div{border-top:1px solid #333;padding-top:.3rem;margin-top:2.4rem;}
+      </style></head><body>${bodyHtml}<script>window.onload=()=>window.print();<\/script></body></html>`);
+    win.document.close();
+  }
+
+  // Build & print a full sales invoice. Line-item detail (product, qty, rate)
+  // is reconstructed from the order and its dispatch, since the invoice itself
+  // stores only the total amount.
+  async function printInvoice(inv) {
+    try {
+      const [order, dispatches] = await Promise.all([
+        apiGet(`/orders/${inv.order}/`),
+        fetchAll(`/finishing/dispatch/?order=${inv.order}`).catch(() => []),
+      ]);
+      const disp = dispatches.find(d => d.quantity_dispatched != null) || dispatches[0];
+      const qty = disp ? Number(disp.quantity_dispatched || 0) : 0;
+      const amount = Number(inv.amount || 0);
+      const rate = qty ? amount / qty : amount;
+      const products = (order.items || []).map(it => `${it.product_name || "Item"} (${it.product_code || "—"})`);
+      const desc = products.length ? products.join(", ") : (order.order_number || "Finished garments");
+      const paid = Number(inv.paid_amount || 0), due = Number(inv.due_amount ?? (amount - paid));
+      const money = v => fmtMoney(v);
+      // Order financial-closure chain up to the order's current status.
+      const chain = ["DISPATCHED", "INVOICED", "PAID"];
+      const ci = chain.indexOf(order.status);
+      const statusChain = (ci >= 0 ? chain.slice(0, ci + 1) : ["DISPATCHED"]).join(" &rarr; ");
+      const body = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+          <div>
+            <div style="font-size:1.6rem;font-weight:800;letter-spacing:1px;">SUBHA APPARELS</div>
+            <div style="color:#555;font-size:0.82rem;">Garment Manufacturing &amp; Export</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:1.25rem;font-weight:700;">TAX INVOICE</div>
+            <div style="font-size:0.86rem;">Invoice No: <strong>${inv.invoice_number || "—"}</strong></div>
+            <div style="font-size:0.86rem;">Date: ${inv.invoice_date || "—"}</div>
+          </div>
+        </div>
+        <hr style="margin:0.9rem 0;border:none;border-top:2px solid #333;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.3rem 2rem;font-size:0.9rem;">
+          <div><span style="color:#555;">Bill To:</span> <strong>${inv.party_name || order.party_name || "—"}</strong></div>
+          <div><span style="color:#555;">Order No:</span> ${order.order_number || inv.order_number || "—"}</div>
+          <div><span style="color:#555;">Order Type:</span> ${(order.order_type || "").replace("_", " ") || "—"}</div>
+          <div><span style="color:#555;">Due Date:</span> ${inv.due_date || "—"}</div>
+        </div>
+        <table>
+          <thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
+          <tbody>
+            <tr><td>${desc}</td><td class="num">${qty || "—"}</td><td class="num">${money(rate)}</td><td class="num">${money(amount)}</td></tr>
+            <tr><th colspan="3" class="num">Total Amount</th><th class="num">${money(amount)}</th></tr>
+            <tr><td colspan="3" class="num" style="border:none;">Paid</td><td class="num" style="border:none;">${money(paid)}</td></tr>
+            <tr><td colspan="3" class="num" style="border:none;"><strong>Balance Due</strong></td><td class="num" style="border:none;"><strong>${money(due)}</strong></td></tr>
+          </tbody>
+        </table>
+        <div style="margin-top:1rem;font-size:0.92rem;">Payment Status: <strong>${inv.payment_status || "—"}</strong></div>
+        ${inv.remarks ? `<div style="margin-top:0.3rem;font-size:0.85rem;color:#555;">Remarks: ${inv.remarks}</div>` : ""}
+        <div class="status">ORDER STATUS &nbsp;&mdash;&nbsp; ${statusChain} ✅</div>
+        <div class="sign"><div>Prepared By — Subha Apparels</div><div>Received By — ${inv.party_name || "Customer"}</div></div>`;
+      openPrintWindow(`Invoice ${inv.invoice_number || order.order_number}`, body);
+    } catch (e) { notify.error("Could not build invoice — " + e.message); }
+  }
+
+  function openPayment(inv) {
+    const amt = numberInput(String(inv.due_amount), () => {}, { min: "0", step: "0.01" });
+    const method = selectEl({}, [
+      { value: "CASH", label: "Cash" }, { value: "BANK_TRANSFER", label: "Bank Transfer" },
+      { value: "CHEQUE", label: "Cheque" }, { value: "ONLINE", label: "Online" },
+    ], "", "Method (optional)");
+    const ref = el("input", { type: "text", placeholder: "Cheque / txn / UTR no. (optional)" });
+    const pdate = el("input", { type: "date", value: new Date().toISOString().slice(0, 10) });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`Record payment — ${inv.invoice_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Due: ${fmtMoney(inv.due_amount)} of ${fmtMoney(inv.amount)}. Recording a payment books it as income to the accounts dashboard, party ledger and order P&L.`),
+      err, field("Amount", amt),
+      el("div", { class: "form-inline" }, [field("Payment Method", method), field("Payment Date", pdate)]),
+      field("Reference No.", ref),
+    ], [
+      el("button", { type: "button", onclick: async () => {
+        try {
+          await apiPost(`/accounts/customer-invoices/${inv.id}/record_payment/`, {
+            amount: Number(amt.value || 0), payment_method: method.value || "", reference: ref.value || "", payment_date: pdate.value || null,
+          });
+          closeCrudModal(); notify.success("Payment recorded — income booked to accounts."); await load();
+        } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Save"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  async function load() {
+    const [orders, invoices] = await Promise.all([fetchAll("/orders/"), fetchAll("/accounts/customer-invoices/")]);
+    ORDERS = orders.filter(o => ["DISPATCHED", "DELIVERED"].includes(o.status));
+    renderForm();
+    const wrap = document.getElementById("list-wrap"); wrap.innerHTML = "";
+    const body = el("div", {}); wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Customer Invoices"), body]));
+    dataTable(body, {
+      columns: [
+        { key: "invoice_number", label: "Invoice #" },
+        { key: "order_number", label: "Order" },
+        { key: "party_name", label: "Customer", render: i => i.party_name || "—" },
+        { key: "invoice_date", label: "Date" },
+        { label: "Amount", value: i => Number(i.amount), render: i => fmtMoney(i.amount) },
+        { label: "Paid", value: i => Number(i.paid_amount), render: i => fmtMoney(i.paid_amount) },
+        { label: "Due", value: i => Number(i.due_amount), render: i => fmtMoney(i.due_amount) },
+        { label: "Status", value: i => i.payment_status, render: i => badge(i.payment_status) },
+        { label: "Action", sortable: false, render: i => el("div", { class: "form-inline" }, [
+            el("button", { type: "button", onclick: () => printInvoice(i) }, "Print"),
+            Number(i.due_amount) > 0 ? el("button", { class: "secondary", type: "button", onclick: () => openPayment(i) }, "Record Payment") : null,
+          ]) },
+      ], rows: invoices, pageSize: 12, initialSort: { key: "invoice_number", dir: "desc" },
+      searchPlaceholder: "Search — invoice, order, customer…", emptyText: "No customer invoices yet.",
+    });
+  }
+
+  load();
+</script>
+{% endblock %}

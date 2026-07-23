@@ -17,6 +17,10 @@ class Order(TimeStampedModel):
         IN_PRODUCTION = "IN_PRODUCTION", "In Production"
         IN_FINISHING = "IN_FINISHING", "In Finishing"
         DISPATCHED = "DISPATCHED", "Dispatched"
+        # Financial closure stages after the goods leave the floor: Accounts
+        # raises the customer invoice (INVOICED) and the buyer settles it (PAID).
+        INVOICED = "INVOICED", "Invoiced"
+        PAID = "PAID", "Paid"
         CANCELLED = "CANCELLED", "Cancelled"
 
     order_number = models.CharField(max_length=50, unique=True, blank=True)
@@ -34,7 +38,10 @@ class Order(TimeStampedModel):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     created_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="orders_created")
 
-    STATUS_SEQUENCE = [Status.DRAFT, Status.CONFIRMED, Status.IN_CUTTING, Status.IN_PRODUCTION, Status.IN_FINISHING, Status.DISPATCHED]
+    STATUS_SEQUENCE = [Status.DRAFT, Status.CONFIRMED, Status.IN_CUTTING, Status.IN_PRODUCTION,
+                       Status.IN_FINISHING, Status.DISPATCHED, Status.INVOICED, Status.PAID]
+    # "Goods have left the floor" -- everything at dispatch or in financial closure.
+    DISPATCHED_OR_BEYOND = [Status.DISPATCHED, Status.INVOICED, Status.PAID]
 
     class Meta:
         ordering = ["-order_date", "-id"]
@@ -100,11 +107,6 @@ class OrderItem(TimeStampedModel):
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="order_items")
     fabric_type = models.ForeignKey(FabricType, on_delete=models.PROTECT, related_name="order_items")
     approved_average = models.DecimalField(max_digits=8, decimal_places=3, help_text="Approved fabric consumption per piece")
-    price_per_piece = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0,
-        help_text="Operator stitching payment per finished piece, set by Merchandising when the order is created. "
-                  "Every operator who completes a piece of this order line is paid this rate x pieces returned.",
-    )
     inner_required = models.BooleanField(default=False)
     fusing_required = models.BooleanField(default=False)
     resting_needed = models.BooleanField(default=False)

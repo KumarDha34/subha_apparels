@@ -10,10 +10,32 @@ class PartySerializer(serializers.ModelSerializer):
 
 
 class ProductSerializer(serializers.ModelSerializer):
+    fabric_type_names = serializers.SerializerMethodField()
+    # Single URL the frontend can show regardless of whether the style has an
+    # uploaded file or a legacy link. None when neither is present.
+    image_display_url = serializers.SerializerMethodField()
+    measurement_chart_display_url = serializers.SerializerMethodField()
+
     class Meta:
         model = Product
         fields = "__all__"
         read_only_fields = ["code"]
+
+    def get_fabric_type_names(self, obj):
+        return [ft.name for ft in obj.fabric_types.all()]
+
+    def _abs(self, file_field):
+        if not file_field:
+            return None
+        url = file_field.url
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url
+
+    def get_image_display_url(self, obj):
+        return self._abs(obj.image) or (obj.image_url or None)
+
+    def get_measurement_chart_display_url(self, obj):
+        return self._abs(obj.measurement_chart_file) or (obj.measurement_chart_url or None)
 
 
 class ProductComponentSerializer(serializers.ModelSerializer):

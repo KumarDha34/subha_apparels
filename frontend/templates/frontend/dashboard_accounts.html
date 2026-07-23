@@ -18,10 +18,17 @@
   </div>
 
   <div class="card">
+    <h3>🚚 Dispatched Orders — ready to invoice</h3>
+    <p class="card-subtitle">Completed orders with quantity, party, dispatch date and challan — raise a customer invoice for these.</p>
+    <div id="dispatched-orders" class="muted">Loading…</div>
+  </div>
+
+  <div class="card">
     <h3>Quick Links</h3>
     <div class="form-inline">
-      <a class="btn" href="/accounts/payments/">Payments</a>
-      <a class="btn secondary" href="/accounts/purchase-orders/">Purchase Orders</a>
+      <a class="btn" href="/accounts/customer-invoices/">Customer Invoices</a>
+      <a class="btn secondary" href="/accounts/quotations/">Quotations</a>
+      <a class="btn secondary" href="/accounts/payments/">Supplier Bills</a>
       <a class="btn secondary" href="/accounts/income-expenses/">Income &amp; Expenses</a>
     </div>
   </div>
@@ -53,5 +60,27 @@
     }
   }
   loadSummary();
+
+  async function loadDispatched() {
+    const wrap = document.getElementById("dispatched-orders");
+    try {
+      const rows = (await fetchAll("/finishing/dispatch/")).filter(d => ["DISPATCHED", "DELIVERED"].includes(d.status));
+      wrap.innerHTML = "";
+      if (!rows.length) { wrap.textContent = "No dispatched orders yet."; return; }
+      dataTable(wrap, {
+        columns: [
+          { key: "order_number", label: "Order #" },
+          { key: "party_name", label: "Customer", render: d => d.party_name || "—" },
+          { label: "Qty Dispatched", value: d => Number(d.quantity_dispatched || 0) },
+          { key: "dispatch_date", label: "Dispatch Date", render: d => d.dispatch_date || "—" },
+          { key: "challan_number", label: "Challan #", render: d => d.challan_number || "—" },
+          { label: "Status", value: d => d.status, render: d => badge(d.status) },
+          { label: "", sortable: false, render: d => el("a", { class: "btn secondary", href: "/accounts/customer-invoices/" }, "Invoice") },
+        ], rows, pageSize: 8, initialSort: { key: "dispatch_date", dir: "desc" },
+        searchPlaceholder: "Search — order, customer, challan…", emptyText: "No dispatched orders yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="muted">Could not load: ${e.message}</p>`; }
+  }
+  loadDispatched();
 </script>
 {% endblock %}

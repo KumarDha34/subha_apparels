@@ -1,7 +1,6 @@
 from django.db import models
-from apps.master_data.models import TimeStampedModel, Product
+from apps.master_data.models import TimeStampedModel
 from apps.cutting.models import Bundle
-from apps.orders.models import Order
 
 
 class Operator(TimeStampedModel):
@@ -29,29 +28,6 @@ class Operator(TimeStampedModel):
         return f"{self.name} ({self.get_operator_type_display()})"
 
 
-class OperatorRate(TimeStampedModel):
-    class RateType(models.TextChoices):
-        PER_BUNDLE = "PER_BUNDLE", "Per Bundle"
-        PER_PIECE = "PER_PIECE", "Per Piece"
-
-    operator = models.ForeignKey(Operator, on_delete=models.CASCADE, related_name="rates")
-    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, blank=True, related_name="operator_rates")
-    order = models.ForeignKey(
-        Order, on_delete=models.SET_NULL, null=True, blank=True, related_name="operator_rates",
-        help_text="Order-specific rate override -- leave Product blank when this is set; it applies to all work on this order regardless of product.",
-    )
-    rate_type = models.CharField(max_length=20, choices=RateType.choices)
-    rate_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    effective_date = models.DateField()
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        ordering = ["-effective_date"]
-
-    def __str__(self):
-        return f"{self.operator} - {self.rate_type} - {self.rate_amount}"
-
-
 class BundleAssignment(TimeStampedModel):
     class Status(models.TextChoices):
         ASSIGNED = "ASSIGNED", "Assigned"
@@ -72,6 +48,8 @@ class BundleAssignment(TimeStampedModel):
     completion_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ASSIGNED)
     issued_quantity = models.PositiveIntegerField(null=True, blank=True, help_text="Pieces handed to the operator; defaults to the bundle's full quantity.")
+    rate_per_piece = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Per-piece pay rate agreed with the operator, set by Production at allocation; total pay = rate x pieces returned.")
     returned_quantity = models.PositiveIntegerField(null=True, blank=True, help_text="Pieces the operator actually returned.")
     shortage_reason = models.TextField(blank=True)
     shortage_reason_status = models.CharField(max_length=20, choices=ShortageStatus.choices, default=ShortageStatus.NOT_APPLICABLE)

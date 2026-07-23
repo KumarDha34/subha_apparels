@@ -16,6 +16,26 @@ class FinishingQualityCheckViewSet(viewsets.ModelViewSet):
     required_roles = ["ADMIN", "FINISHING_SUPERVISOR"]
     filterset_fields = ["order"]
 
+    @action(detail=False, methods=["get"])
+    def breakdown(self, request):
+        """Size/colour breakdown for the QC grid, reconciled to what Finishing
+        actually received. Query: ?order=<id>. If pieces were lost in a process
+        (e.g. washing 723 -> 720), the breakdown is capped at the received 720
+        so QC works on the pieces physically in hand, not the produced total.
+        Returns total (received), produced, process_loss, by_size, by_color, grid."""
+        from apps.operators.services import order_piece_breakdown
+        from apps.production.models import ProcessDispatch
+        order_id = request.query_params.get("order")
+        cap = None
+        if order_id:
+            fin = (ProcessDispatch.objects
+                   .filter(order_id=order_id, department=ProcessDispatch.Department.FINISHING,
+                           status=ProcessDispatch.Status.RECEIVED, quantity_received__isnull=False)
+                   .order_by("-received_date", "-id").first())
+            if fin is not None:
+                cap = fin.quantity_received
+        return Response(order_piece_breakdown(order_id, cap_total=cap))
+
     @action(detail=True, methods=["post"])
     def record_rework(self, request, pk=None):
         """Close the alteration loop: of the pieces sent for alteration, record

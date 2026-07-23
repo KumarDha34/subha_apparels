@@ -33,7 +33,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
         model = OrderItem
         fields = [
             "id", "product", "product_code", "product_name", "fabric_type", "fabric_type_name",
-            "approved_average", "price_per_piece", "inner_required", "fusing_required", "resting_needed", "colors",
+            "approved_average", "inner_required", "fusing_required", "resting_needed", "colors",
         ]
 
 

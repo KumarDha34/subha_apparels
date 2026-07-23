@@ -9,10 +9,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
 from apps.users.permissions import ReadOnlyOrHasRole, HasRole
 from apps.cutting.models import Bundle
-from .models import Operator, OperatorRate, BundleAssignment, OperatorIncome
+from .models import Operator, BundleAssignment, OperatorIncome
 from .services import order_piece_rate, assignment_labor_cost
 from .serializers import (
-    OperatorSerializer, OperatorRateSerializer,
+    OperatorSerializer,
     BundleAssignmentSerializer, OperatorIncomeSerializer,
 )
 
@@ -48,8 +48,8 @@ class OperatorViewSet(viewsets.ModelViewSet):
         efficiency_pct = round((pieces_returned - total_defects) / pieces_issued * 100, 2) if pieces_issued else None
         quality_rate_pct = round((pieces_returned - total_defects) / pieces_returned * 100, 2) if pieces_returned else None
         # Live earnings + a day-by-day breakdown of accepted output and the
-        # money it earned -- paid on each order line's price_per_piece (the
-        # rate the merchandiser set), so this is always exactly rate x pieces
+        # money it earned -- paid on each assignment's rate_per_piece (the rate
+        # Production set at allocation), so this is always exactly rate x pieces
         # returned, independent of whether an OperatorIncome statement exists yet.
         completed_dated = completed.select_related("bundle__cutting_order__order_item").order_by("completion_date")
         total_earned = Decimal("0")
@@ -151,14 +151,6 @@ class OperatorViewSet(viewsets.ModelViewSet):
             .order_by("week")
         )
         return Response(list(rows))
-
-
-class OperatorRateViewSet(viewsets.ModelViewSet):
-    queryset = OperatorRate.objects.select_related("operator", "product").all()
-    serializer_class = OperatorRateSerializer
-    permission_classes = [ReadOnlyOrHasRole]
-    required_roles = ["ADMIN", "PRODUCTION_SUPERVISOR"]
-    filterset_fields = ["operator", "product", "rate_type", "is_active"]
 
 
 class BundleAssignmentViewSet(viewsets.ModelViewSet):
@@ -339,9 +331,9 @@ class OperatorIncomeViewSet(viewsets.ModelViewSet):
         """
         Body: {operator, period_start, period_end}
         Sums completed/quality-checked assignments in that window. The
-        operator is paid the per-piece rate the Merchandiser set on the
-        order line (OrderItem.price_per_piece) times the pieces they actually
-        returned -- e.g. 29 pieces returned on an order priced at 250/pc
+        operator is paid the per-piece rate Production set on the bundle
+        assignment (BundleAssignment.rate_per_piece) times the pieces they
+        actually returned -- e.g. 29 pieces returned at a rate of 250/pc
         earns 29 x 250 = 7,250. Computed via the shared assignment_labor_cost
         helper the per-order P&L view also uses, so the two never drift.
         """

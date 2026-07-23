@@ -1,7 +1,6 @@
 from django.contrib import admin
-from .models import Operator, OperatorRate, BundleAssignment, OperatorIncome
+from .models import Operator, BundleAssignment, OperatorIncome
 
 admin.site.register(Operator)
-admin.site.register(OperatorRate)
 admin.site.register(BundleAssignment)
 admin.site.register(OperatorIncome)

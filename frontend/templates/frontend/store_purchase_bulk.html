@@ -93,7 +93,7 @@
       document.getElementById("success-banner").appendChild(
         el("div", { class: "card", style: "border-left:3px solid var(--accent);" },
           `✅ Purchase order ${created.po_number} created (status: Pending). Receive it from the Purchase Orders page once materials arrive.`));
-    } catch (e) { alert("Error: " + e.message); }
+    } catch (e) { notify.error(e.message); }
   }
 
   (async function init() {

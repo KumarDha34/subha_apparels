@@ -17,11 +17,23 @@ def movement_annotations(rel="transactions"):
         "total_received": _sum("RECEIPT"), "total_issued": _sum("ISSUE"),
         "total_returned": _sum("RETURN"), "total_wastage": _sum("WASTAGE"),
     }
-from .models import FabricStock, StockTransaction, AccessoryStock, AccessoryStockTransaction, FinishedGoodsReceipt
+from .models import FabricStock, StockTransaction, AccessoryStock, AccessoryStockTransaction, FinishedGoodsReceipt, OrderAdditionalCharge
 from .serializers import (
     FabricStockSerializer, StockTransactionSerializer,
     AccessoryStockSerializer, AccessoryStockTransactionSerializer, FinishedGoodsReceiptSerializer,
+    OrderAdditionalChargeSerializer,
 )
+
+
+class OrderAdditionalChargeViewSet(viewsets.ModelViewSet):
+    """Extra order costs Store books (transport, customs, labour, washing, etc.)."""
+    queryset = OrderAdditionalCharge.objects.select_related("order__party").all()
+    serializer_class = OrderAdditionalChargeSerializer
+    permission_classes = [ReadOnlyOrHasRole]
+    # Entered from the Orders list, so whoever manages orders can book charges.
+    required_roles = ["ADMIN", "STORE_MANAGER", "MERCHANDISE"]
+    filterset_fields = ["order", "charge_type"]
+    search_fields = ["order__order_number"]
 
 
 class FinishedGoodsReceiptViewSet(viewsets.ModelViewSet):

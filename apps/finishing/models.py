@@ -57,11 +57,17 @@ class FinishingOperation(TimeStampedModel):
 
 class FinishingQualityCheck(TimeStampedModel):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="finishing_qc_checks")
+    # QC recorded per colour + size so results carry a full breakdown
+    # (e.g. "30 White S passed, 5 White M failed").
+    color = models.ForeignKey("master_data.Color", on_delete=models.SET_NULL, null=True, blank=True, related_name="finishing_qc_checks")
+    size = models.ForeignKey("master_data.Size", on_delete=models.SET_NULL, null=True, blank=True, related_name="finishing_qc_checks")
     checked_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="finishing_qc_checks")
     quantity_checked = models.PositiveIntegerField()
     quantity_passed = models.PositiveIntegerField()
     quantity_altered = models.PositiveIntegerField(default=0, help_text="Pieces sent for alteration/rework.")
     quantity_rejected = models.PositiveIntegerField(default=0)
+    fail_reason = models.TextField(blank=True, help_text="Why the failed pieces failed (per colour+size row).")
+    alter_reason = models.TextField(blank=True, help_text="Why the altered pieces need alteration.")
     # Rework loop: of the pieces sent for alteration, how many came back OK
     # (re-inspected pass) vs scrapped after rework.
     quantity_reworked_passed = models.PositiveIntegerField(default=0)
@@ -110,6 +116,9 @@ class Dispatch(TimeStampedModel):
     order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name="dispatch")
     dispatched_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="dispatches")
     dispatch_date = models.DateField(null=True, blank=True)
+    challan_number = models.CharField(max_length=100, blank=True, help_text="Delivery challan number.")
+    size_breakdown = models.JSONField(default=dict, blank=True, help_text='Pieces dispatched per size, e.g. {"S": 30, "M": 40}.')
+    color_breakdown = models.JSONField(default=dict, blank=True, help_text='Pieces dispatched per colour, e.g. {"White": 40, "Black": 30}.')
     tracking_number = models.CharField(max_length=100, blank=True)
     carrier = models.CharField(max_length=150, blank=True)
     mode_of_transport = models.CharField(max_length=20, choices=TransportMode.choices, blank=True)

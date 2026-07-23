@@ -99,7 +99,7 @@
       document.getElementById("success-banner").appendChild(
         el("div", { class: "card", style: "border-left:3px solid var(--accent);" },
           `✅ Added directly to stock — PO ${created.po_number} is now Received.`));
-    } catch (e) { alert("Error: " + e.message); }
+    } catch (e) { notify.error(e.message); }
   }
 
   (async function init() {

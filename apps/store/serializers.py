@@ -1,5 +1,23 @@
 from rest_framework import serializers
-from .models import FabricStock, StockTransaction, AccessoryStock, AccessoryStockTransaction, FinishedGoodsReceipt
+from .models import FabricStock, StockTransaction, AccessoryStock, AccessoryStockTransaction, FinishedGoodsReceipt, OrderAdditionalCharge
+
+
+class OrderAdditionalChargeSerializer(serializers.ModelSerializer):
+    order_number = serializers.CharField(source="order.order_number", read_only=True)
+    party_name = serializers.CharField(source="order.party.name", read_only=True, default=None)
+    charge_type_display = serializers.CharField(source="get_charge_type_display", read_only=True)
+
+    class Meta:
+        model = OrderAdditionalCharge
+        fields = [
+            "id", "order", "order_number", "party_name", "charge_type", "charge_type_display",
+            "amount", "remarks", "created_by", "created_at",
+        ]
+        read_only_fields = ["created_by"]
+
+    def create(self, validated_data):
+        validated_data["created_by"] = self.context["request"].user
+        return super().create(validated_data)
 
 
 class FinishedGoodsReceiptSerializer(serializers.ModelSerializer):

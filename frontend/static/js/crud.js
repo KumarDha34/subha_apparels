@@ -78,10 +78,14 @@ function fillForm(inputs, fields, item) {
 }
 
 /* ---- shared modal, used by crudPanel's View/Edit dialogs ---- */
-function closeCrudModal() { document.getElementById("modal-overlay")?.remove(); }
+let _crudModalKeyHandler = null;
+function closeCrudModal() {
+  document.getElementById("modal-overlay")?.remove();
+  if (_crudModalKeyHandler) { document.removeEventListener("keydown", _crudModalKeyHandler); _crudModalKeyHandler = null; }
+}
 /** `opts.wide` renders a roomier modal (660px) for detail/summary views
  *  (party profile, order/PO breakdowns) -- plain forms stay the default,
- *  compact width. */
+ *  compact width. Press Esc (or click the backdrop) to close. */
 function showCrudModal(titleText, bodyNodes, footerNodes, opts = {}) {
   closeCrudModal();
   document.body.appendChild(el("div", { class: "modal-overlay", id: "modal-overlay", onclick: e => { if (e.target.id === "modal-overlay") closeCrudModal(); } }, [
@@ -91,6 +95,9 @@ function showCrudModal(titleText, bodyNodes, footerNodes, opts = {}) {
       el("div", { class: "form-inline", style: "margin-top:1rem;" }, footerNodes),
     ]),
   ]));
+  // Esc closes the popup — attach once per open, removed on close.
+  _crudModalKeyHandler = (e) => { if (e.key === "Escape") closeCrudModal(); };
+  document.addEventListener("keydown", _crudModalKeyHandler);
 }
 
 /** Generic "create a missing master-data record without leaving the page"

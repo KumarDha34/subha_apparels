@@ -162,13 +162,16 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # No request throttling: this is an internal LAN tool whose single-page
+    # frontend fires many API calls per screen (fetchAll + several endpoints),
+    # so a per-day cap would lock staff out during normal use. Only anonymous
+    # traffic (the login/token endpoint) is rate-limited, generously, to slow
+    # brute-force attempts without ever affecting logged-in work.
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.UserRateThrottle",
         "rest_framework.throttling.AnonRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        "user": "1000/day",
-        "anon": "100/day",
+        "anon": "120/min",
     },
 }
 

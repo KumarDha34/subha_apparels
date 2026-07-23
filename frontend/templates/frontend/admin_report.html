@@ -53,6 +53,82 @@
     if (type === "pct") return v == null ? "—" : v + "%";
     return (v === null || v === undefined || v === "") ? "—" : String(v);
   }
+  function openPrintWindow(title, bodyHtml) {
+    const win = window.open("", "_blank", "width=860,height=960");
+    win.document.write(`<!DOCTYPE html><html><head><title>${title}</title><style>
+      body{font-family:Arial,Helvetica,sans-serif;padding:2rem;color:#111;font-size:13px;}
+      h1{font-size:1.5rem;margin:0;letter-spacing:1px;} .sub{color:#555;font-size:.8rem;}
+      table{width:100%;border-collapse:collapse;margin-top:.6rem;} th,td{border:1px solid #999;padding:.4rem .6rem;text-align:left;}
+      th{background:#f0f0f0;} td.num,th.num{text-align:right;}
+      .sec{margin-top:1.4rem;font-weight:700;border-bottom:2px solid #333;padding-bottom:.2rem;text-transform:uppercase;font-size:.82rem;letter-spacing:.5px;}
+      .grid{display:grid;grid-template-columns:1fr 1fr;gap:.15rem 2rem;font-size:.85rem;margin-top:.5rem;}
+      .sign{margin-top:2.6rem;} .sign .line{border-top:1px solid #333;width:230px;padding-top:.3rem;margin-top:2.4rem;}
+      </style></head><body>${bodyHtml}<script>window.onload=()=>window.print();<\/script></body></html>`);
+    win.document.close();
+  }
+
+  async function printPartyStatement(partyId) {
+    let s;
+    try { s = await apiGet(`/accounts/party-statement/?party=${partyId}`); }
+    catch (e) { notify.error("Could not build statement — " + e.message); return; }
+    const p = s.party, m = s.summary, money = v => fmtMoney(v);
+    const ledgerRows = s.entries.length
+      ? s.entries.map(e => `<tr><td>${e.date}</td><td>${e.voucher}</td><td>${e.particulars}</td>
+          <td class="num">${e.debit ? money(e.debit) : "—"}</td><td class="num">${e.credit ? money(e.credit) : "—"}</td>
+          <td class="num">${money(e.balance)}</td></tr>`).join("")
+      : `<tr><td colspan="6" style="text-align:center;color:#777;">No transactions yet.</td></tr>`;
+    const payRows = s.payments.length
+      ? s.payments.map(x => `<tr><td>${x.date}</td><td>${x.reference}</td><td>${x.method}</td>
+          <td class="num">${money(x.amount)}</td><td>CLEARED</td></tr>`).join("")
+      : `<tr><td colspan="5" style="text-align:center;color:#777;">No payments recorded.</td></tr>`;
+    const a = s.ageing;
+    const nil = m.closing <= 0;
+    const letter = nil
+      ? `Your account shows a <strong>NIL balance</strong>. All invoices have been settled in full. Thank you for your prompt payment.`
+      : `Your account shows an outstanding balance of <strong>${money(m.closing)}</strong>. We kindly request settlement as per the agreed credit terms (${p.credit_terms}).`;
+    const body = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        <div><h1>SUBHA APPARELS</h1><div class="sub">Garment Manufacturing &amp; Export</div></div>
+        <div style="text-align:right;"><div style="font-size:1.2rem;font-weight:700;">STATEMENT OF ACCOUNT</div>
+          <div class="sub">As on ${s.as_of}</div></div>
+      </div>
+      <hr style="margin:.8rem 0;border:none;border-top:2px solid #333;">
+      <div class="grid">
+        <div><b>Party Name:</b> ${p.name}</div><div><b>Party Code:</b> ${p.code}</div>
+        <div><b>Contact:</b> ${p.contact_person} / ${p.phone}</div><div><b>Email:</b> ${p.email}</div>
+        <div><b>Address:</b> ${p.address}</div><div><b>PAN/VAT:</b> ${p.pan_vat}</div>
+        <div><b>Credit Terms:</b> ${p.credit_terms}</div><div><b>Credit Limit:</b> ${money(p.credit_limit)}</div>
+      </div>
+
+      <div class="sec">Ledger Account</div>
+      <table><thead><tr><th>Date</th><th>Voucher #</th><th>Particulars</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Balance</th></tr></thead>
+        <tbody>${ledgerRows}</tbody></table>
+
+      <div class="sec">Periodic Summary</div>
+      <table><tbody>
+        <tr><td>Opening Balance</td><td class="num">${money(m.opening)}</td></tr>
+        <tr><td>Total Debit (Invoices)</td><td class="num">${money(m.total_debit)}</td></tr>
+        <tr><td>Total Credit (Received)</td><td class="num">${money(m.total_credit)}</td></tr>
+        <tr><th>Closing Balance</th><th class="num">${money(m.closing)}</th></tr>
+      </tbody></table>
+
+      <div class="sec">Ageing Analysis (Outstanding)</div>
+      <table><thead><tr><th>0-30 Days</th><th>31-60 Days</th><th>61-90 Days</th><th>90+ Days</th></tr></thead>
+        <tbody><tr><td class="num">${money(a["0-30"])}</td><td class="num">${money(a["31-60"])}</td>
+        <td class="num">${money(a["61-90"])}</td><td class="num">${money(a["90+"])}</td></tr></tbody></table>
+
+      <div class="sec">Payment History</div>
+      <table><thead><tr><th>Date</th><th>Reference</th><th>Method</th><th class="num">Amount</th><th>Status</th></tr></thead>
+        <tbody>${payRows}</tbody></table>
+
+      <div class="sec">Statement of Account</div>
+      <p style="font-size:.9rem;">To: <strong>${p.name}</strong><br>Date: ${s.as_of}</p>
+      <p style="font-size:.9rem;">Dear Sir/Madam,</p>
+      <p style="font-size:.9rem;">Please find below the statement of your account with us for the period ending ${s.as_of}. ${letter}</p>
+      <div class="sign"><div>For Subha Apparels</div><div class="line">Authorized Signatory</div></div>`;
+    openPrintWindow(`Statement — ${p.name}`, body);
+  }
+
   function showRowDetail(d, row) {
     const pairs = d.columns.map(c => [c.label, fmtCell(row[c.key], c.type)]);
     const nodes = [];
@@ -76,8 +152,10 @@
         el("td", {}, fmtCell(dr[dc.key], dc.type)))))));
       nodes.push(t);
     }
-    showCrudModal(`${d.title} — ${row[d.columns[0].key] ?? ""}`, nodes,
-      [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+    const footer = [];
+    if (KEY === "party-ledger" && row.id) footer.push(el("button", { type: "button", onclick: () => printPartyStatement(row.id) }, "🖨️ Print Statement"));
+    footer.push(el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close"));
+    showCrudModal(`${d.title} — ${row[d.columns[0].key] ?? ""}`, nodes, footer, { wide: true });
   }
 
   function renderGallery(container, d) {

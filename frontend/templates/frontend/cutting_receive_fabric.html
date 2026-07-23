@@ -21,7 +21,7 @@
     try {
       await apiPost(`/cutting/cutting-orders/${c.id}/receive/`, {});
       await refresh();
-    } catch (e) { alert("Error: " + e.message); }
+    } catch (e) { notify.error(e.message); }
   }
 
   async function refresh() {
