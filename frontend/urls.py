@@ -66,7 +66,6 @@ urlpatterns = [
 
     # Production's own screens: accessories received from Store, receiving
     # bundles from Cutting, allocating to operators, and performance/income.
-    path("production/accessories/", views.page_view, {"page": "production_accessories"}, name="production-accessories"),
     path("production/receive-bundles/", views.page_view, {"page": "production_receive_bundles"}, name="production-receive-bundles"),
     path("production/bundle-allocation/", views.page_view, {"page": "production_bundle_allocation"}, name="production-bundle-allocation"),
     path("production/send-to-finishing/", views.page_view, {"page": "production_send_to_finishing"}, name="production-send-to-finishing"),

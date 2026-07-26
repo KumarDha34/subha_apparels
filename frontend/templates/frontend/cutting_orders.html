@@ -75,11 +75,44 @@
   const receive = c => doAction(c, "receive");
   const complete = c => doAction(c, "complete_cutting");
   
-  async function returnFabric(c) {
+  // Settle leftover issued-but-unused fabric: return to Store (back on the
+  // shelf) or write off as wastage (a loss). Real-factory rule — unused fabric
+  // is never left unaccounted.
+  function returnFabric(c) {
     const unit = c.fabric_unit || "m";
-    const q = prompt(`Return unused fabric to Store (max ${c.remaining_quantity} ${unit}):`);
-    if (q === null || !q) return;
-    doAction(c, "return_fabric", { quantity: Number(q) });
+    const rem = Number(c.remaining_quantity) || 0;
+    const retInput = numberInput(String(rem), () => {}, { min: "0", max: String(rem), step: "0.01" });
+    const wasteInput = numberInput("0", () => {}, { min: "0", max: String(rem), step: "0.01" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const doSettle = async () => {
+      err.style.display = "none";
+      const ret = Number(retInput.value) || 0, waste = Number(wasteInput.value) || 0;
+      if (ret <= 0 && waste <= 0) { err.textContent = "Enter an amount to return and/or waste."; err.style.display = "block"; return; }
+      if (ret + waste > rem + 0.001) { err.textContent = `Return + wastage can't exceed the ${rem} ${unit} leftover.`; err.style.display = "block"; return; }
+      try {
+        if (ret > 0) await apiPost(`/cutting/cutting-orders/${c.id}/return_fabric/`, { quantity: ret });
+        if (waste > 0) await apiPost(`/cutting/cutting-orders/${c.id}/waste_fabric/`, { quantity: waste });
+        closeCrudModal();
+        notify.success(`Settled leftover — ${ret > 0 ? "returned " + ret + " " + unit : ""}${ret > 0 && waste > 0 ? ", " : ""}${waste > 0 ? "wasted " + waste + " " + unit : ""}.`);
+        await refresh();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`↩ Settle leftover fabric — ${c.cutting_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        `${rem} ${unit} of issued fabric is unused. Return it to Store (available for future orders) or write it off as wastage (a loss).`),
+      err,
+      el("div", { class: "form-inline" }, [
+        field(`↩ Return to Store (${unit})`, retInput),
+        field(`♻️ Mark as Wastage (${unit})`, wasteInput),
+      ]),
+      el("div", { class: "form-inline" }, [
+        el("button", { class: "secondary", type: "button", onclick: () => { retInput.value = String(rem); wasteInput.value = "0"; } }, "Return all"),
+        el("button", { class: "secondary", type: "button", onclick: () => { wasteInput.value = String(rem); retInput.value = "0"; } }, "Waste all"),
+      ]),
+    ], [
+      el("button", { type: "button", onclick: doSettle }, "Confirm"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
   }
   
   async function receiveAll(cos) {
@@ -415,7 +448,7 @@
             acts.push(el("button", { class: "warning", type: "button", onclick: () => approveOverride(c) }, "Approve Over-consumption"));
         }
         if (c.bundle_count > 0) acts.push(el("button", { class: "success", type: "button", onclick: () => complete(c) }, "Complete"));
-        if (Number(c.remaining_quantity) > 0) acts.push(el("button", { class: "secondary", type: "button", onclick: () => returnFabric(c) }, `Return ${c.remaining_quantity} ${unit}`));
+        if (Number(c.remaining_quantity) > 0) acts.push(el("button", { class: "secondary", type: "button", onclick: () => returnFabric(c) }, `Settle ${c.remaining_quantity} ${unit} leftover`));
     }
     
     // "Send to Production" — only while there are bundles still to send.

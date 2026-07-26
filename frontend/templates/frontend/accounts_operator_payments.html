@@ -2,7 +2,7 @@
 {% block title %}Operator Payments - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Operator Payments</h2>
-  <p class="page-subtitle">Pick an operator to see every piece of work — completed, paid, pending (and for which orders/products) and still being worked. Pay for specific pieces, one bundle at a time or all pending at once.</p>
+  <p class="page-subtitle">Pick an operator to see every piece of work — completed, paid, pending (and for which orders/products), still being worked, and the accessories issued to them. Pay for specific pieces, one bundle at a time or all pending at once.</p>
 
   <div class="card" id="picker"></div>
   <div id="summary-wrap"></div>
@@ -90,8 +90,13 @@
       ]));
       return;
     }
-    let d;
-    try { d = await apiGet(`/operators/assignments/work_summary/?operator=${opId}`); }
+    let d, accessories = [];
+    try {
+      [d, accessories] = await Promise.all([
+        apiGet(`/operators/assignments/work_summary/?operator=${opId}`),
+        fetchAll(`/production/operator-accessory-issues/?operator=${opId}`).catch(() => []),
+      ]);
+    }
     catch (e) { wrap.innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
     const t = d.totals;
     const op = OPERATORS.find(o => String(o.id) === String(opId)) || {};
@@ -148,6 +153,33 @@
         { label: "Action", sortable: false, render: r => (r.pending_quantity > 0
             ? el("button", { type: "button", onclick: () => payBundle(r) }, "Pay") : el("span", { class: "badge success" }, "Paid")) },
       ], rows: d.completed, pageSize: 12, searchPlaceholder: "Search — order, product, bundle…", emptyText: "No completed work.",
+    });
+
+    // ---- accessories issued to this operator ----
+    const abody = el("div", {});
+    const accIssued = accessories.reduce((s, a) => s + Number(a.issued_quantity || 0), 0);
+    const accUsed = accessories.reduce((s, a) => s + Number(a.used_quantity || 0), 0);
+    const accRemaining = accessories.reduce((s, a) => s + Number(a.remaining_quantity || 0), 0);
+    const accCovered = accessories.reduce((s, a) => s + Number(a.pieces_covered || 0), 0);
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "crud-header" }, [
+        el("h3", {}, `🧷 Accessories Issued to this Operator (${accessories.length})`),
+        el("div", { class: "muted", style: "font-size:0.82rem;" },
+          accessories.length ? `Issued ${accIssued} · Used ${accUsed} · Covered ${accCovered} pcs · Remaining ${accRemaining}` : ""),
+      ]),
+      abody,
+    ]));
+    if (!accessories.length) abody.appendChild(el("p", { class: "muted" }, "No accessories issued directly to this operator."));
+    else dataTable(abody, {
+      columns: [
+        { label: "Accessory", value: r => r.accessory_label || "", render: r => r.accessory_label || "—" },
+        { label: "Order", value: r => r.order_number || "", render: r => r.order_number || "—" },
+        { label: "Issued", num: true, value: r => Number(r.issued_quantity || 0), render: r => String(r.issued_quantity || 0) },
+        { label: "Used", num: true, value: r => Number(r.used_quantity || 0), render: r => el("span", { style: "color:#0369a1;" }, String(r.used_quantity || 0)) },
+        { label: "Pieces Covered", num: true, value: r => Number(r.pieces_covered || 0), render: r => String(r.pieces_covered || 0) },
+        { label: "Returned", num: true, value: r => Number(r.returned_quantity || 0), render: r => String(r.returned_quantity || 0) },
+        { label: "Remaining", num: true, value: r => Number(r.remaining_quantity || 0), render: r => (Number(r.remaining_quantity || 0) > 0 ? el("span", { class: "badge warning" }, String(r.remaining_quantity)) : el("span", { class: "muted" }, "0")) },
+      ], rows: accessories, pageSize: 8, searchPlaceholder: "Search — accessory, order…", emptyText: "No accessories issued.",
     });
 
     // ---- still working ----

@@ -439,6 +439,39 @@ class CuttingOrderViewSet(viewsets.ModelViewSet):
             cutting_order.save(update_fields=["returned_quantity", "returned_at", "returned_by", "updated_at"])
         return Response(self.get_serializer(cutting_order).data)
 
+    @action(detail=True, methods=["post"])
+    def waste_fabric(self, request, pk=None):
+        """Write off leftover issued-but-unused fabric that will NOT be returned
+        to Store as wastage (a loss). The fabric was already issued out of stock
+        when it went to Cutting, so this does NOT change available stock -- it
+        moves the leftover out of the 'remaining' limbo into tracked
+        wastage_quantity and logs a WASTAGE stock transaction for the audit
+        trail. This is the real-factory rule: unused fabric is either returned
+        (back on the shelf) or wasted (gone), never left unaccounted."""
+        self._require_cutting_role(request)
+        cutting_order = self.get_object()
+        quantity = request.data.get("quantity")
+        if quantity is None:
+            return Response({"detail": "quantity is required."}, status=400)
+        quantity = Decimal(str(quantity))
+        remaining = cutting_order.remaining_quantity
+        if quantity <= 0 or quantity > remaining:
+            return Response({"detail": f"quantity must be between 0 and {remaining} (remaining)."}, status=400)
+
+        with transaction.atomic():
+            StockTransaction.objects.create(
+                fabric_stock=cutting_order.fabric_issued,
+                transaction_type=StockTransaction.TransactionType.WASTAGE,
+                quantity=quantity,
+                reference=cutting_order.cutting_number,
+                remarks=request.data.get("remarks")
+                        or f"Unreturned leftover from cutting order {cutting_order.cutting_number} written off as wastage",
+                created_by=request.user,
+            )
+            cutting_order.wastage_quantity = (cutting_order.wastage_quantity or 0) + quantity
+            cutting_order.save(update_fields=["wastage_quantity", "updated_at"])
+        return Response(self.get_serializer(cutting_order).data)
+
 
 class CuttingPieceViewSet(viewsets.ModelViewSet):
     queryset = CuttingPiece.objects.select_related("cutting_order", "color", "size", "component").all()

@@ -8,6 +8,7 @@ from .views import (
 )
 from .reports import AdminReportView
 from .product_pnl import ProductPnLListView, ProductPnLDetailView
+from .admin_dashboard import AdminFinancialView
 
 router = DefaultRouter()
 router.register("purchase-orders", PurchaseOrderViewSet, basename="purchase-order")
@@ -20,6 +21,7 @@ router.register("customer-invoices", CustomerInvoiceViewSet, basename="customer-
 
 urlpatterns = [
     path("summary/", AccountsSummaryView.as_view(), name="accounts-summary"),
+    path("admin-dashboard/", AdminFinancialView.as_view(), name="admin-dashboard"),
     path("kpi/", ManagementKPIView.as_view(), name="management-kpi"),
     path("report/", AdminReportView.as_view(), name="admin-report"),
     path("orders/<int:pk>/pnl/", OrderPnLView.as_view(), name="order-pnl"),

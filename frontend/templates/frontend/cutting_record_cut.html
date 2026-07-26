@@ -52,11 +52,42 @@
     try { await apiPost(`/cutting/cutting-orders/${c.id}/approve_override/`, { approved, remarks }); await refresh(); }
     catch (e) { notify.error(e.message); }
   }
-  async function returnFabric(c) {
-    const qty = prompt(`Quantity to return to Store (max ${c.remaining_quantity}):`);
-    if (qty === null || !qty) return;
-    try { await apiPost(`/cutting/cutting-orders/${c.id}/return_fabric/`, { quantity: Number(qty), remarks: "" }); await refresh(); }
-    catch (e) { notify.error(e.message); }
+  // Settle leftover issued-but-unused fabric: return it to Store (back on the
+  // shelf) or write it off as wastage (a loss) — the real-factory rule.
+  function settleLeftover(c) {
+    const rem = Number(c.remaining_quantity) || 0;
+    const retInput = numberInput(String(rem), () => {}, { min: "0", max: String(rem), step: "0.01" });
+    const wasteInput = numberInput("0", () => {}, { min: "0", max: String(rem), step: "0.01" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    const doSettle = async () => {
+      err.style.display = "none";
+      const ret = Number(retInput.value) || 0, waste = Number(wasteInput.value) || 0;
+      if (ret <= 0 && waste <= 0) { err.textContent = "Enter an amount to return and/or waste."; err.style.display = "block"; return; }
+      if (ret + waste > rem + 0.001) { err.textContent = `Return + wastage can't exceed the ${rem} m leftover.`; err.style.display = "block"; return; }
+      try {
+        if (ret > 0) await apiPost(`/cutting/cutting-orders/${c.id}/return_fabric/`, { quantity: ret, remarks: "" });
+        if (waste > 0) await apiPost(`/cutting/cutting-orders/${c.id}/waste_fabric/`, { quantity: waste, remarks: "" });
+        closeCrudModal();
+        notify.success(`Settled leftover — ${ret > 0 ? "returned " + ret + " m" : ""}${ret > 0 && waste > 0 ? ", " : ""}${waste > 0 ? "wasted " + waste + " m" : ""}.`);
+        await refresh();
+      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+    };
+    showCrudModal(`↩ Settle leftover fabric — ${c.cutting_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        `${rem} m of issued fabric is unused. Return it to Store (available for future orders) or write it off as wastage (a loss). It must not be left unaccounted.`),
+      err,
+      el("div", { class: "form-inline" }, [
+        field("↩ Return to Store (m)", retInput),
+        field("♻️ Mark as Wastage (m)", wasteInput),
+      ]),
+      el("div", { class: "form-inline" }, [
+        el("button", { class: "secondary", type: "button", onclick: () => { retInput.value = String(rem); wasteInput.value = "0"; } }, "Return all"),
+        el("button", { class: "secondary", type: "button", onclick: () => { wasteInput.value = String(rem); retInput.value = "0"; } }, "Waste all"),
+      ]),
+    ], [
+      el("button", { type: "button", onclick: doSettle }, "Confirm"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
   }
 
   async function submitLayer(c, state, errorBox) {
@@ -221,7 +252,7 @@
 
     const returnBtn = c.remaining_quantity > 0
       ? el("div", { class: "form-inline", style: "margin-top:0.6rem;" }, [
-          el("button", { class: "secondary", type: "button", onclick: () => returnFabric(c) }, `↩ Return ${c.remaining_quantity} m to Store`)])
+          el("button", { class: "secondary", type: "button", onclick: () => settleLeftover(c) }, `↩ Settle ${c.remaining_quantity} m leftover (return / wastage)`)])
       : null;
 
     return el("div", { class: "card" }, [

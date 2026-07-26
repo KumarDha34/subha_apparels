@@ -3,13 +3,29 @@
 {% block content %}
   <div class="page-header-row">
     <div>
-      <h2 class="page-title">Admin Overview</h2>
-      <p class="page-subtitle">System-wide snapshot across every department.</p>
+      <h2 class="page-title">Financial Dashboard</h2>
+      <p class="page-subtitle">Complete financial breakdown — income, expenses, cash position and profitability — plus system-wide oversight.</p>
     </div>
     <a class="btn" href="/dashboard/kpi/">📈 Open Management KPI Dashboard</a>
   </div>
 
   <div class="grid grid-4" id="stat-cards"></div>
+
+  <h3 class="section-title">💰 Financial Overview <span style="font-weight:400;font-size:0.8rem;color:var(--muted);">— same detail as Accounts, with full drill-downs</span></h3>
+  <div class="grid grid-4" id="fin-kpi"></div>
+  <div class="grid grid-2">
+    <div class="card"><h3>📈 Income Breakdown</h3><p class="card-subtitle">Click a row to see the orders behind it.</p><div id="fin-income" class="muted">Loading…</div></div>
+    <div class="card"><h3>💸 Expense Breakdown</h3><p class="card-subtitle">Click a row to drill into suppliers / operators.</p><div id="fin-expense" class="muted">Loading…</div></div>
+  </div>
+  <div class="grid grid-2">
+    <div class="card"><h3>🏢 Department Costs</h3><div id="fin-dept" class="muted">Loading…</div></div>
+    <div class="card"><h3>🏦 Cash Position</h3><div id="fin-cash" class="muted">Loading…</div></div>
+  </div>
+  <div class="grid grid-2">
+    <div class="card"><h3>📦 Per-Order Profitability</h3><div id="fin-orders" class="muted">Loading…</div></div>
+    <div class="card"><h3>👕 Per-Product Profitability</h3><div id="fin-products" class="muted">Loading…</div></div>
+  </div>
+  <div class="card"><h3>📊 System-Wide KPIs</h3><div class="grid grid-3" id="fin-kpis-sys"></div></div>
 
   <div class="card" id="approvals-card">
     <h3>✅ Work Needing Your Approval</h3>
@@ -69,7 +85,174 @@
 {% block scripts %}
 <script>
   Auth.guardPage(["ADMIN"]);
-  renderShell("admin", "Admin Overview");
+  renderShell("admin", "Financial Dashboard");
+
+  // ===================== FINANCIAL OVERVIEW =====================
+  const GREEN = "#1a7f4b", RED = "#b3261e", BLUE = "#0369a1", AMBER = "#b4690e", BRAND = "#e66239";
+  const money = v => fmtMoney(v);
+
+  function finTile(icon, label, value, tone, sub) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? RED : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.8rem;padding:1.1rem 1.2rem;" }, [
+      el("div", { style: "font-size:1.7rem;line-height:1;" }, icon),
+      el("div", {}, [
+        el("div", { class: "value", style: `font-size:1.45rem;color:${c};line-height:1.1;` }, value),
+        el("div", { class: "label" }, label),
+        sub ? el("div", { class: "muted", style: "font-size:0.72rem;margin-top:0.15rem;" }, sub) : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  // A labelled bar; if `children` given, render as an expandable <details> tree.
+  function barRow(label, value, total, color, children) {
+    const pct = total ? Math.round(Number(value || 0) / total * 100) : 0;
+    const head = el("div", { style: "margin:0.5rem 0;" }, [
+      el("div", { style: "display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:0.22rem;" }, [
+        el("span", {}, label), el("strong", {}, `${money(value)}  ·  ${pct}%`)]),
+      el("div", { style: "height:9px;border-radius:5px;background:#f0eeeb;overflow:hidden;" }, [
+        el("div", { style: `height:100%;width:${pct}%;background:${color};border-radius:5px;transition:width .5s ease;` })]),
+    ]);
+    if (!children || !children.length) return head;
+    const det = el("details", { style: "margin:0.35rem 0 0.5rem;" });
+    det.appendChild(el("summary", { style: "cursor:pointer;" }, head));
+    det.appendChild(el("div", { style: "margin:0.2rem 0 0.4rem 1rem;padding-left:0.6rem;border-left:2px solid #eee;" }, children));
+    return det;
+  }
+
+  function subLine(label, value, extra) {
+    return el("div", { style: "display:flex;justify-content:space-between;font-size:0.78rem;color:#5b6472;padding:0.14rem 0;" }, [
+      el("span", {}, "↳ " + label + (extra ? `  ${extra}` : "")), el("span", {}, money(value))]);
+  }
+
+  const INCOME_LABEL = { ADVANCE: "Advance Payments", FINAL: "Final Payments", OTHER: "Other Income" };
+
+  async function loadFinancial() {
+    let d;
+    try { d = await apiGet("/accounts/admin-dashboard/"); }
+    catch (e) { document.getElementById("fin-income").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+
+    // --- totals ---
+    const t = d.totals, kpi = document.getElementById("fin-kpi");
+    kpi.innerHTML = "";
+    kpi.append(
+      finTile("📈", "Total Income", money(t.total_income), "good"),
+      finTile("📉", "Total Expenses", money(t.total_expenses), "bad"),
+      finTile(t.net_profit >= 0 ? "✅" : "⚠️", "Net Profit / Loss", money(t.net_profit), t.net_profit >= 0 ? "good" : "bad"),
+      finTile("🏦", "Cash Position", money(t.cash_position), t.cash_position >= 0 ? "good" : "bad"));
+
+    // --- income breakdown (drill by order) ---
+    const inc = document.getElementById("fin-income"); inc.innerHTML = "";
+    const incTotal = Object.values(d.income_breakdown).reduce((s, v) => s + Number(v.amount || 0), 0);
+    if (!incTotal) inc.appendChild(el("p", { class: "muted" }, "No income recorded yet."));
+    Object.entries(d.income_breakdown).forEach(([code, v]) => {
+      if (!v.amount) { inc.appendChild(barRow(INCOME_LABEL[code] || v.label, 0, incTotal, GREEN)); return; }
+      const kids = (v.orders || []).map(o => subLine(o.order, o.amount));
+      inc.appendChild(barRow(INCOME_LABEL[code] || v.label, v.amount, incTotal, GREEN, kids));
+    });
+
+    // --- expense breakdown (drill by supplier / operator) ---
+    const exp = document.getElementById("fin-expense"); exp.innerHTML = "";
+    const eb = d.expense_breakdown;
+    const expTotal = t.total_expenses || 0;
+    // raw materials -> fabric/accessory -> supplier -> order
+    const rm = eb.raw_materials;
+    const rmKids = [];
+    const supGroup = (title, node, color) => {
+      if (!node.amount) return;
+      rmKids.push(el("div", { style: "font-weight:600;font-size:0.8rem;margin-top:0.25rem;" }, `${title}: ${money(node.amount)}`));
+      (node.by_supplier || []).forEach(s => {
+        rmKids.push(subLine(s.supplier, s.amount));
+        (s.orders || []).forEach(o => rmKids.push(el("div", { style: "font-size:0.72rem;color:#8a92a0;padding-left:1.2rem;display:flex;justify-content:space-between;" }, [el("span", {}, "· " + o.order), el("span", {}, money(o.amount))])));
+      });
+    };
+    supGroup("Fabric", rm.fabric, "#6d4aff"); supGroup("Accessories", rm.accessories, "#0891b2");
+    exp.appendChild(barRow("Raw Materials (fabric + accessories)", rm.amount, expTotal, BRAND, rmKids));
+    // operator payments -> operator
+    const op = eb.operator_payments;
+    exp.appendChild(barRow("Operator Payments", op.amount, expTotal, "#e66239",
+      (op.by_operator || []).map(o => subLine(o.operator, o.amount, `(${o.pieces} pcs)`))));
+    // supplier extra
+    if (eb.supplier_extra.amount) exp.appendChild(barRow("Supplier Bill Extras", eb.supplier_extra.amount, expTotal, AMBER));
+    // other
+    exp.appendChild(barRow("Other Expenses", eb.other_expenses.amount, expTotal, "#9333ea",
+      (eb.other_expenses.items || []).map(i => subLine(i.label, i.amount))));
+
+    // --- department costs ---
+    const dc = d.department_costs, deptBox = document.getElementById("fin-dept"); deptBox.innerHTML = "";
+    const deptTotal = dc.store.total + dc.cutting.total + dc.production.total + dc.finishing.total;
+    deptBox.appendChild(barRow("🧵 Store (fabric + accessories)", dc.store.total, deptTotal, "#6d4aff",
+      [subLine("Fabric Purchases", dc.store.fabric), subLine("Accessory Purchases", dc.store.accessories)]));
+    deptBox.appendChild(barRow("✂️ Cutting", dc.cutting.total, deptTotal, "#0891b2"));
+    deptBox.appendChild(barRow("🏭 Production (labour + processing)", dc.production.total, deptTotal, BRAND,
+      [subLine("Operator Payments", dc.production.operator_payments), subLine("Processing (wash/print/etc.)", dc.production.processing)]));
+    deptBox.appendChild(barRow("🧼 Finishing (transport)", dc.finishing.total, deptTotal, AMBER,
+      [subLine("Transport", dc.finishing.transport)]));
+
+    // --- cash position ---
+    const cp = d.cash_position, cashBox = document.getElementById("fin-cash"); cashBox.innerHTML = "";
+    cashBox.appendChild(el("details", { open: true }, [
+      el("summary", { style: "cursor:pointer;font-weight:600;color:" + GREEN }, `Receivable (customers): ${money(cp.receivable.total)}`),
+      el("div", { style: "margin:0.2rem 0 0.5rem 1rem;padding-left:0.6rem;border-left:2px solid #eee;" },
+        cp.receivable.by_party.length ? cp.receivable.by_party.map(r => subLine(r.party, r.amount)) : [el("p", { class: "muted", style: "font-size:0.78rem;" }, "All settled.")]),
+    ]));
+    cashBox.appendChild(el("details", { open: true }, [
+      el("summary", { style: "cursor:pointer;font-weight:600;color:" + RED }, `Payable (suppliers): ${money(cp.payable.total)}`),
+      el("div", { style: "margin:0.2rem 0 0.5rem 1rem;padding-left:0.6rem;border-left:2px solid #eee;" },
+        cp.payable.by_supplier.length ? cp.payable.by_supplier.map(r => subLine(r.supplier, r.amount)) : [el("p", { class: "muted", style: "font-size:0.78rem;" }, "Nothing owed.")]),
+    ]));
+    cashBox.appendChild(el("div", { class: "card stat", style: `margin-top:0.5rem;border-left:4px solid ${cp.net >= 0 ? GREEN : RED};` }, [
+      el("div", { class: "value", style: `color:${cp.net >= 0 ? GREEN : RED};` }, money(cp.net)),
+      el("div", { class: "label" }, "Net Cash Position (receivable − payable)")]));
+
+    // --- per-order profitability ---
+    const ordBox = document.getElementById("fin-orders"); ordBox.innerHTML = "";
+    if (!d.orders.length) ordBox.appendChild(el("p", { class: "muted" }, "No orders yet."));
+    else dataTable(ordBox, {
+      columns: [
+        { label: "Order", key: "order" }, { label: "Customer", key: "party" },
+        { label: "Revenue", num: true, value: o => o.revenue, render: o => money(o.revenue) },
+        { label: "Cost", num: true, value: o => o.cost, render: o => money(o.cost) },
+        { label: "Profit", num: true, value: o => o.profit, render: o => el("strong", { style: `color:${o.profit >= 0 ? GREEN : RED};` }, money(o.profit)) },
+        { label: "Margin", num: true, value: o => o.margin ?? -9999, render: o => o.margin == null ? "—" : el("span", { style: `color:${o.margin >= 0 ? GREEN : RED};` }, o.margin + "%") },
+      ], rows: d.orders, pageSize: 6, initialSort: { key: "profit", dir: "asc" }, searchPlaceholder: "Search orders…", emptyText: "No orders.",
+    });
+
+    // --- per-product profitability ---
+    const prodBox = document.getElementById("fin-products"); prodBox.innerHTML = "";
+    if (!d.products.length) prodBox.appendChild(el("p", { class: "muted" }, "No product sales yet."));
+    else dataTable(prodBox, {
+      columns: [
+        { label: "Product", key: "product" }, { label: "Units", num: true, value: p => p.units, render: p => String(p.units) },
+        { label: "Revenue", num: true, value: p => p.revenue, render: p => money(p.revenue) },
+        { label: "COGS", num: true, value: p => p.cogs, render: p => money(p.cogs) },
+        { label: "Profit", num: true, value: p => p.profit, render: p => el("strong", { style: `color:${p.profit >= 0 ? GREEN : RED};` }, money(p.profit)) },
+        { label: "Margin", num: true, value: p => p.margin, render: p => el("span", { style: `color:${p.margin >= 0 ? GREEN : RED};` }, p.margin + "%") },
+      ], rows: d.products, pageSize: 6, initialSort: { key: "profit", dir: "desc" }, searchPlaceholder: "Search products…", emptyText: "No products.",
+    });
+
+    // --- system-wide KPIs ---
+    const k = d.kpis, sys = document.getElementById("fin-kpis-sys"); sys.innerHTML = "";
+    const kpiGroup = (title, rows) => el("div", { class: "card", style: "padding:0.9rem 1rem;" }, [
+      el("h4", { style: "margin:0 0 0.5rem;" }, title),
+      ...rows.map(([l, v]) => el("div", { style: "display:flex;justify-content:space-between;font-size:0.85rem;padding:0.18rem 0;" }, [el("span", { class: "muted" }, l), el("strong", {}, String(v))])),
+    ]);
+    sys.append(
+      kpiGroup("🏭 Production & Efficiency", [
+        ["Pieces Produced", k.production.pieces_produced],
+        ["Overall Efficiency", k.production.efficiency == null ? "—" : k.production.efficiency + "%"],
+        ["Fabric Wastage", k.production.wastage_pct + "%"],
+        ["Pending Dispatch", k.production.pending_dispatch]]),
+      kpiGroup("✅ Quality & People", [
+        ["Total Rejects", k.quality_people.rejects],
+        ["Active Operators", k.quality_people.active_operators],
+        ["Employees on Record", k.quality_people.employees]]),
+      kpiGroup("📋 Order Pipeline", [
+        ["Total Orders", k.pipeline.total_orders],
+        ["Dispatched", k.pipeline.dispatched],
+        ["In Progress", k.pipeline.in_progress],
+        ["Cancelled", k.pipeline.cancelled]]));
+  }
+  loadFinancial();
 
   const cards = document.getElementById("stat-cards");
   function statCard(label, value, kind) {
