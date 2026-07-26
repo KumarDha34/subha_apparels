@@ -10,6 +10,15 @@ class Order(TimeStampedModel):
         FIXED_QUANTITY = "FIXED_QUANTITY", "Fixed Quantity"
         RATIO_BASED = "RATIO_BASED", "Ratio Based"
 
+    class OrderCategory(models.TextChoices):
+        BULK = "BULK", "Bulk Production"
+        SAMPLE = "SAMPLE", "Sample"
+
+    class SampleApproval(models.TextChoices):
+        PENDING = "PENDING", "Pending Approval"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+
     class Status(models.TextChoices):
         DRAFT = "DRAFT", "Draft"
         CONFIRMED = "CONFIRMED", "Confirmed"
@@ -27,7 +36,21 @@ class Order(TimeStampedModel):
     party = models.ForeignKey(Party, on_delete=models.PROTECT, related_name="orders")
     order_date = models.DateField()
     order_type = models.CharField(max_length=20, choices=OrderType.choices)
+    order_category = models.CharField(
+        max_length=20, choices=OrderCategory.choices, default=OrderCategory.BULK,
+        help_text="Sample = a small pre-production run for client approval; Bulk = the full production order.",
+    )
     is_repeat = models.BooleanField(default=False, verbose_name="New Repeat")
+    # Sample-approval workflow: a Sample order is a pre-production run the client
+    # signs off on. Once it's been dispatched/completed, Merchandising records the
+    # client's decision here (Approved -> proceed to bulk; Rejected -> redo/drop).
+    # Blank for Bulk orders; PENDING is set automatically when a Sample is created.
+    sample_status = models.CharField(
+        max_length=20, choices=SampleApproval.choices, blank=True,
+        help_text="Client's decision on a sample, recorded once it is dispatched/completed.",
+    )
+    sample_decided_date = models.DateField(null=True, blank=True)
+    sample_feedback = models.TextField(blank=True, help_text="Client feedback captured with the approve/reject decision.")
     remarks = models.TextField(blank=True)
     cutting_instruction = models.TextField(
         blank=True,
@@ -59,6 +82,10 @@ class Order(TimeStampedModel):
             self.save(update_fields=["status", "updated_at"])
 
     def save(self, *args, **kwargs):
+        # A brand-new Sample starts its approval clock at PENDING; Bulk orders
+        # never carry a sample status.
+        if self.order_category == self.OrderCategory.SAMPLE and not self.sample_status:
+            self.sample_status = self.SampleApproval.PENDING
         if not self.order_number:
             # The Party row lock must stay held for the generate-then-insert
             # sequence as a whole -- releasing it right after picking the

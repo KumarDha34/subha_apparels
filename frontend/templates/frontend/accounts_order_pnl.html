@@ -2,40 +2,148 @@
 {% block title %}Order P&amp;L - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Per-Order Profit &amp; Loss</h2>
-  <p class="page-subtitle">Fabric, accessory, labor, finishing, and transport cost vs. income received, for each order.</p>
+  <p class="page-subtitle">Every rupee that went into each order — fabric, accessories, labour, processing, transport and extra charges — set against the money received, with the margin laid bare.</p>
 
-  <div id="orders-table-wrap"></div>
+  <div class="grid grid-4" id="pnl-kpi"></div>
+
+  <div class="card">
+    <h3>📦 Orders</h3>
+    <p class="card-subtitle">Cost, income and profit are computed live per order. Click <strong>View P&amp;L</strong> for the full cost breakdown.</p>
+    <div id="orders-table-wrap" class="muted">Loading…</div>
+  </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-  Auth.guardPage(["ACCOUNTS"]);
+  Auth.guardPage(["ADMIN", "ACCOUNTS"]);
   renderShell("accounts-order-pnl", "Order P&L");
+
+  const GREEN = "#1a7f4b", RED = "#b3261e", BLUE = "#0369a1", AMBER = "#b4690e";
+  // Cost component palette + friendly labels
+  const COST_META = {
+    fabric_cost:        { label: "Fabric",            icon: "🧵", color: "#6d4aff" },
+    accessory_cost:     { label: "Accessories",       icon: "🧷", color: "#0891b2" },
+    labor_cost:         { label: "Labour",            icon: "👷", color: "#e66239" },
+    finishing_cost:     { label: "Processing",        icon: "🧼", color: "#0369a1" },
+    transport_cost:     { label: "Transport",         icon: "🚚", color: "#b4690e" },
+    additional_charges: { label: "Additional Charges", icon: "➕", color: "#9333ea" },
+  };
+  const DEPT_LABELS = { WASHING: "Washing", PRINTING: "Printing", EMBROIDERY: "Embroidery", BUTTON: "Button", FINISHING: "Finishing" };
+  const CHARGE_LABELS = { TRANSPORT: "Transport", COURIER: "Courier", CUSTOMS: "Customs", STORAGE: "Storage",
+    SAMPLE: "Sample", TESTING: "Testing", PENALTY: "Penalty", HANDLING: "Handling", OTHER: "Other" };
+
+  function kpiTile(icon, label, value, tone, sub) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? RED : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.8rem;padding:1.1rem 1.2rem;" }, [
+      el("div", { style: "font-size:1.7rem;line-height:1;" }, icon),
+      el("div", {}, [
+        el("div", { class: "value", style: `font-size:1.5rem;color:${c};line-height:1.1;` }, value),
+        el("div", { class: "label" }, label),
+        sub ? el("div", { class: "muted", style: "font-size:0.75rem;margin-top:0.15rem;" }, sub) : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  function marginBadge(margin) {
+    if (margin === null || margin === undefined) return el("span", { class: "muted" }, "—");
+    const good = margin >= 0;
+    return el("span", { style: `display:inline-block;padding:0.15rem 0.55rem;border-radius:999px;font-weight:700;font-size:0.8rem;color:#fff;background:${good ? GREEN : RED};` }, `${margin}%`);
+  }
+
+  // A single horizontal stacked bar showing how the total cost splits by component.
+  function stackedCostBar(costs) {
+    const parts = Object.keys(COST_META).map(k => ({ ...COST_META[k], v: Number(costs[k] || 0) })).filter(p => p.v > 0);
+    const total = parts.reduce((s, p) => s + p.v, 0);
+    const bar = el("div", { style: "display:flex;height:22px;border-radius:6px;overflow:hidden;background:#f0eeeb;" });
+    if (!total) { bar.appendChild(el("div", { class: "muted", style: "padding:0 .5rem;font-size:.8rem;" }, "No recorded cost")); return el("div", {}, [bar]); }
+    parts.forEach(p => bar.appendChild(el("div", {
+      style: `width:${(p.v / total * 100).toFixed(1)}%;background:${p.color};`,
+      title: `${p.label}: ${fmtMoney(p.v)} (${Math.round(p.v / total * 100)}%)` })));
+    const legend = el("div", { style: "display:flex;flex-wrap:wrap;gap:.6rem;margin-top:.5rem;" },
+      parts.map(p => el("span", { style: "display:inline-flex;align-items:center;gap:.3rem;font-size:.78rem;" }, [
+        el("span", { style: `width:10px;height:10px;border-radius:2px;background:${p.color};display:inline-block;` }),
+        el("span", { class: "muted" }, `${p.label} ${Math.round(p.v / total * 100)}%`) ])));
+    return el("div", {}, [bar, legend]);
+  }
+
+  // Cost breakdown as labelled rows with mini bars.
+  function costRows(costs, processCosts, chargeCosts) {
+    const total = Number(costs.total_cost || 0);
+    const box = el("div", {});
+    Object.keys(COST_META).forEach(k => {
+      const v = Number(costs[k] || 0);
+      const meta = COST_META[k];
+      const pct = total ? Math.round(v / total * 100) : 0;
+      const row = el("div", { style: "margin:.6rem 0;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;font-size:.86rem;margin-bottom:.25rem;" }, [
+          el("span", {}, `${meta.icon} ${meta.label}`),
+          el("strong", { style: v > 0 ? "" : "color:#9aa0aa;font-weight:400;" }, `${fmtMoney(v)}${v > 0 ? "  ·  " + pct + "%" : ""}`) ]),
+        el("div", { style: "height:8px;border-radius:5px;background:#f0eeeb;overflow:hidden;" }, [
+          el("div", { style: `height:100%;width:${pct}%;background:${meta.color};border-radius:5px;transition:width .5s ease;` }) ]),
+      ]);
+      box.appendChild(row);
+      // Sub-breakdowns for processing (per department) and additional charges (per type)
+      if (k === "finishing_cost" && processCosts && Object.keys(processCosts).length) {
+        box.appendChild(subLines(processCosts, DEPT_LABELS));
+      }
+      if (k === "additional_charges" && chargeCosts && Object.keys(chargeCosts).length) {
+        box.appendChild(subLines(chargeCosts, CHARGE_LABELS));
+      }
+    });
+    return box;
+  }
+
+  function subLines(obj, labels) {
+    return el("div", { style: "margin:-.2rem 0 .5rem 1.4rem;padding-left:.6rem;border-left:2px solid #eee;" },
+      Object.entries(obj).map(([k, v]) => el("div", { style: "display:flex;justify-content:space-between;font-size:.78rem;color:#6b7280;padding:.12rem 0;" }, [
+        el("span", {}, "↳ " + (labels[k] || k)), el("span", {}, fmtMoney(v)) ])));
+  }
 
   async function viewPnl(order) {
     const closeBtn = el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close");
-    const body = el("div", { class: "muted" }, "Loading...");
-    showCrudModal(`📊 P&L — ${order.order_number}`, [body], [closeBtn], { wide: true });
+    const body = el("div", { class: "muted" }, "Loading…");
+    showCrudModal(`📊 Profit & Loss — ${order.order_number}`, [body], [closeBtn], { wide: true });
     try {
       const p = await apiGet(`/accounts/orders/${order.id}/pnl/`);
+      const profit = Number(p.profit_loss || 0), good = profit >= 0;
       body.innerHTML = "";
-      body.appendChild(detailGrid([
-        ["Fabric Cost", fmtMoney(p.costs.fabric_cost)],
-        ["Accessory Cost", fmtMoney(p.costs.accessory_cost)],
-        ["Labor Cost", fmtMoney(p.costs.labor_cost)],
-        ["Finishing Cost", fmtMoney(p.costs.finishing_cost)],
-        ["Transport Cost", fmtMoney(p.costs.transport_cost)],
-        ["Additional Charges", fmtMoney(p.costs.additional_charges)],
-        ["Total Cost", fmtMoney(p.costs.total_cost)],
-        ["Income Received", fmtMoney(p.income_received)],
-        ["Profit / Loss", fmtMoney(p.profit_loss)],
+
+      // Header meta line
+      body.appendChild(el("div", { class: "muted", style: "margin-bottom:.9rem;" },
+        `${order.party_name || "—"}  ·  ${badge ? "" : ""}${order.status || ""}  ·  ${order.order_date || ""}`));
+
+      // Top tiles
+      body.appendChild(el("div", { class: "grid grid-4", style: "margin-bottom:1rem;" }, [
+        kpiTile("💵", "Income Received", fmtMoney(p.income_received), "good"),
+        kpiTile("🧾", "Total Cost", fmtMoney(p.costs.total_cost), "info"),
+        kpiTile(good ? "✅" : "⚠️", good ? "Net Profit" : "Net Loss", fmtMoney(Math.abs(profit)), good ? "good" : "bad"),
+        kpiTile("📈", "Margin", p.margin_pct === null ? "—" : p.margin_pct + "%", good ? "good" : "bad"),
       ]));
-      const profitClass = p.profit_loss >= 0 ? "stat-success" : "stat-danger";
-      body.appendChild(el("div", { class: `card stat ${profitClass}`, style: "margin-top:1rem;" }, [
-        el("div", { class: "value" }, fmtMoney(p.profit_loss)),
-        el("div", { class: "label" }, p.profit_loss >= 0 ? "Net Profit" : "Net Loss"),
+
+      // Stacked composition bar
+      body.appendChild(el("div", { class: "card", style: "margin-bottom:1rem;" }, [
+        el("h4", { style: "margin:0 0 .6rem;" }, "Cost Composition"),
+        stackedCostBar(p.costs) ]));
+
+      // Two columns: breakdown + waterfall figures
+      body.appendChild(el("div", { class: "grid grid-2" }, [
+        el("div", { class: "card" }, [ el("h4", { style: "margin:0 0 .5rem;" }, "Cost Breakdown"), costRows(p.costs, p.process_costs, p.charge_costs) ]),
+        el("div", { class: "card" }, [
+          el("h4", { style: "margin:0 0 .5rem;" }, "Bottom Line"),
+          detailGrid([
+            ["Total Cost", fmtMoney(p.costs.total_cost)],
+            ["Income Received", fmtMoney(p.income_received)],
+            [good ? "Net Profit" : "Net Loss", el("strong", { style: `color:${good ? GREEN : RED};` }, fmtMoney(Math.abs(profit)))],
+            ["Margin", el("strong", { style: `color:${good ? GREEN : RED};` }, p.margin_pct === null ? "—" : p.margin_pct + "%")],
+          ]),
+          el("div", { class: `card stat`, style: `margin-top:.8rem;border-left:4px solid ${good ? GREEN : RED};` }, [
+            el("div", { class: "value", style: `color:${good ? GREEN : RED};` }, fmtMoney(profit)),
+            el("div", { class: "label" }, good ? "Order is profitable" : "Order is at a loss"),
+          ]),
+        ]),
       ]));
-      body.appendChild(el("p", { class: "muted", style: "margin-top:1rem;" }, p.note));
+
+      body.appendChild(el("p", { class: "muted", style: "margin-top:1rem;font-size:.8rem;" }, "ℹ️ " + p.note));
     } catch (e) {
       body.innerHTML = `<p class="error-msg">Could not load P&amp;L: ${e.message}</p>`;
     }
@@ -43,18 +151,48 @@
 
   async function refresh() {
     const wrap = document.getElementById("orders-table-wrap");
-    wrap.innerHTML = "Loading...";
+    const kpiBox = document.getElementById("pnl-kpi");
+    wrap.textContent = "Loading…";
     try {
       const orders = await fetchAll("/orders/");
+      // Fetch P&L for every order in parallel so the table + KPIs are fully populated.
+      const pnls = await Promise.all(orders.map(o =>
+        apiGet(`/accounts/orders/${o.id}/pnl/`).then(p => ({ o, p })).catch(() => ({ o, p: null }))));
+      const rows = pnls.map(({ o, p }) => ({
+        ...o,
+        _cost: p ? Number(p.costs.total_cost || 0) : 0,
+        _income: p ? Number(p.income_received || 0) : 0,
+        _profit: p ? Number(p.profit_loss || 0) : 0,
+        _margin: p ? p.margin_pct : null,
+      }));
+
+      // KPI roll-up
+      const tRev = rows.reduce((s, r) => s + r._income, 0);
+      const tCost = rows.reduce((s, r) => s + r._cost, 0);
+      const tProfit = tRev - tCost;
+      const overall = tRev ? Math.round(tProfit / tRev * 1000) / 10 : null;
+      kpiBox.innerHTML = "";
+      kpiBox.append(
+        kpiTile("📦", "Orders", String(rows.length), "info"),
+        kpiTile("💵", "Total Revenue", fmtMoney(tRev), "good"),
+        kpiTile("🧾", "Total Cost", fmtMoney(tCost), "info"),
+        kpiTile(tProfit >= 0 ? "✅" : "⚠️", "Net Profit / Loss", fmtMoney(tProfit), tProfit >= 0 ? "good" : "bad",
+          overall === null ? "" : `${overall}% overall margin`));
+
       wrap.innerHTML = "";
-      const body = el("div", {});
-      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Orders"), body]));
-      dataTable(body, {
+      dataTable(wrap, {
         columns: [
-          { label: "Order #", key: "order_number" }, { label: "Party", key: "party_name" },
-          { label: "Status", key: "status", render: o => badge(o.status) }, { label: "Date", key: "order_date" },
+          { label: "Order #", key: "order_number" },
+          { label: "Party", key: "party_name", render: o => o.party_name || "—" },
+          { label: "Status", key: "status", render: o => badge(o.status) },
+          { label: "Date", key: "order_date" },
+          { label: "Cost", num: true, value: o => o._cost, render: o => fmtMoney(o._cost) },
+          { label: "Income", num: true, value: o => o._income, render: o => fmtMoney(o._income) },
+          { label: "Profit / Loss", num: true, value: o => o._profit,
+            render: o => el("strong", { style: `color:${o._profit >= 0 ? GREEN : RED};` }, fmtMoney(o._profit)) },
+          { label: "Margin", num: true, value: o => o._margin ?? -9999, render: o => marginBadge(o._margin) },
           { label: "", sortable: false, render: o => el("button", { class: "secondary", type: "button", onclick: () => viewPnl(o) }, "View P&L") },
-        ], rows: orders, pageSize: 12, initialSort: { key: "order_date", dir: "desc" },
+        ], rows, pageSize: 12, initialSort: { key: "order_date", dir: "desc" },
         searchPlaceholder: "Search orders — number, party, status…", emptyText: "No orders yet.",
       });
     } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }

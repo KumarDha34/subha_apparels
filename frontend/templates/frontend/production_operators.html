@@ -14,18 +14,181 @@
 
   const panels = document.getElementById("panels");
 
+  // ✅ NEW: Function to manage group members
+  async function manageGroupMembers(group) {
+    // Load available individual operators
+    const [allOperators, groupDetail] = await Promise.all([
+      fetchAll("/operators/operators/"),
+      apiGet(`/operators/operators/${group.id}/`)
+    ]);
+    
+    const individuals = allOperators.filter(o => 
+      o.operator_type === "INDIVIDUAL" && o.is_active !== false
+    );
+    const currentMembers = groupDetail.members || [];
+    const memberIds = new Set(currentMembers.map(m => m.id));
+    
+    // Create the modal content
+    const content = el("div", {});
+    
+    // Current Members Section
+    const memberSection = el("div", { class: "section-title" }, "Current Members");
+    content.appendChild(memberSection);
+    
+    const memberList = el("div", {});
+    if (currentMembers.length === 0) {
+      memberList.appendChild(el("p", { class: "muted" }, "No members in this group yet."));
+    } else {
+      const table = el("table", { class: "data-table" });
+      table.appendChild(el("thead", {}, el("tr", {}, [
+        "Name", "Contact", "Role", "Actions"
+      ].map(h => el("th", {}, h)))));
+      
+      const tb = el("tbody");
+      currentMembers.forEach(m => {
+        const isLeader = m.is_group_leader;
+        tb.appendChild(el("tr", {}, [
+          el("td", {}, m.name),
+          el("td", {}, m.contact || "—"),
+          el("td", {}, isLeader ? badge("Leader") : badge("Member")),
+          el("td", {}, el("div", { class: "form-inline" }, [
+            !isLeader ? el("button", { 
+              class: "secondary", 
+              type: "button", 
+              onclick: async () => {
+                try {
+                  await apiPost(`/operators/operators/${group.id}/set_leader/`, { member_id: m.id });
+                  notify.success(`${m.name} is now group leader.`);
+                  closeCrudModal();
+                  manageGroupMembers(group);
+                } catch (e) {
+                  notify.error(e.message);
+                }
+              }
+            }, "Make Leader") : null,
+            el("button", { 
+              class: "danger", 
+              type: "button", 
+              onclick: async () => {
+                if (await showConfirm(`Remove ${m.name} from this group?`)) {
+                  try {
+                    await apiPost(`/operators/operators/${group.id}/remove_member/`, { member_id: m.id });
+                    notify.success(`${m.name} removed from group.`);
+                    closeCrudModal();
+                    manageGroupMembers(group);
+                  } catch (e) {
+                    notify.error(e.message);
+                  }
+                }
+              }
+            }, "Remove")
+          ]))
+        ]));
+      });
+      table.appendChild(tb);
+      memberList.appendChild(table);
+    }
+    content.appendChild(memberList);
+    
+    // Add Member Section
+    const addSection = el("div", { class: "section-title", style: "margin-top:1.5rem;" }, "Add Member");
+    content.appendChild(addSection);
+    
+    const availableIndividuals = individuals.filter(i => !memberIds.has(i.id));
+    
+    if (availableIndividuals.length === 0) {
+      content.appendChild(el("p", { class: "muted" }, "No available individual operators to add."));
+    } else {
+      const sel = el("select", { style: "width:100%;padding:0.5rem;" }, 
+        availableIndividuals.map(o => 
+          el("option", { value: o.id }, `${o.name} (${o.contact || "—"})`)
+        )
+      );
+      
+      const addBtn = el("button", { 
+        type: "button", 
+        onclick: async () => {
+          const memberId = sel.value;
+          if (!memberId) {
+            notify.warning("Select an operator to add.");
+            return;
+          }
+          try {
+            await apiPost(`/operators/operators/${group.id}/add_member/`, { member_id: Number(memberId) });
+            notify.success("Member added to group.");
+            closeCrudModal();
+            manageGroupMembers(group);
+          } catch (e) {
+            notify.error(e.message);
+          }
+        }
+      }, "Add Member");
+      
+      content.appendChild(el("div", { class: "form-inline", style: "margin-top:0.5rem;" }, [
+        field("Select Operator", sel),
+        addBtn
+      ]));
+    }
+    
+    // Group Summary
+    const summary = el("div", { 
+      class: "mode-banner mode-fixed", 
+      style: "margin-top:1rem;" 
+    }, [
+      el("strong", {}, "Group Summary: "),
+      `${currentMembers.length} members · `,
+      currentMembers.some(m => m.is_group_leader) ? 
+        `Leader: ${currentMembers.find(m => m.is_group_leader).name}` : 
+        "No leader assigned"
+    ]);
+    content.appendChild(summary);
+    
+    showCrudModal(`Manage Group — ${group.name}`, [content], [
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")
+    ], { wide: true });
+  }
+
   crudPanel(panels, {
     title: "Operators",
     endpoint: "/operators/operators/",
     columns: [
-      { label: "Name", render: o => el("button", { class: "link-btn", type: "button", title: "View full overview", onclick: () => showOperatorReport(o.id, o.name) }, o.name) },
+      { 
+        label: "Name", 
+        render: o => el("button", { 
+          class: "link-btn", 
+          type: "button", 
+          title: "View full overview", 
+          onclick: () => showOperatorReport(o.id, o.name) 
+        }, o.name) 
+      },
       { key: "operator_type", label: "Type" },
       { key: "contact", label: "Contact" },
       { render: o => badge(o.is_active ? "Active" : "Inactive"), label: "Status" },
+      // ✅ NEW: Manage Members column for GROUP type
+      { 
+        label: "Actions", 
+        sortable: false,
+        render: o => {
+          if (o.operator_type === "GROUP") {
+            return el("button", { 
+              class: "secondary", 
+              type: "button", 
+              onclick: () => manageGroupMembers(o)
+            }, "👥 Manage Members");
+          }
+          return "—";
+        }
+      },
     ],
     fields: [
       { name: "name", label: "Name", required: true },
-      { name: "operator_type", label: "Type", type: "select", choices: ["INDIVIDUAL", "GROUP"], required: true },
+      { 
+        name: "operator_type", 
+        label: "Type", 
+        type: "select", 
+        choices: ["INDIVIDUAL", "GROUP"], 
+        required: true 
+      },
       { name: "contact", label: "Contact" },
       { name: "email", label: "Email" },
       { name: "joined_date", label: "Joined Date", type: "date" },

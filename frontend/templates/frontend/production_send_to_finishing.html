@@ -13,13 +13,14 @@
   Auth.guardPage(["PRODUCTION_SUPERVISOR", "FINISHING_SUPERVISOR"]);
   renderShell("production-send-to-finishing", "Send to Process");
 
-  const DEPARTMENTS = ["FINISHING", "WASHING", "PRINTING", "EMBROIDERY"];
+  const DEPARTMENTS = ["WASHING", "PRINTING", "EMBROIDERY", "BUTTON", "FINISHING"];
   const deptLabel = d => d[0] + d.slice(1).toLowerCase();
   let MASTER = { orders: [], vendors: [] };
   let state = blankSend();
   let summary = null;
+  let paintCost = () => {};   // updates the live "qty × rate = total" hint
   function blankSend() {
-    return { order: "", department: "", quantity_sent: "", is_outsourced: false, vendor: "", cost: "", sent_date: new Date().toISOString().slice(0, 10), remarks: "" };
+    return { order: "", department: "", quantity_sent: "", is_outsourced: false, vendor: "", cost_per_piece: "", sent_date: new Date().toISOString().slice(0, 10), remarks: "" };
   }
 
   async function loadMaster() {
@@ -67,18 +68,31 @@
     wrap.innerHTML = "";
     const err = el("div", { class: "error-msg", style: "display:none;" });
     const orderRow = el("div", { class: "form-inline" }, [
-      field("Order", selectEl({ onchange: e => onOrderChange(e.target.value) }, MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "Select order")),
+      field("Order", selectEl({ onchange: e => onOrderChange(e.target.value) }, MASTER.orders.map(o => ({ value: o.id, label: o.order_label })), state.order, "Select order")),
     ]);
     const form = el("div", { class: "form-inline" }, [
       field("Department", selectEl({ onchange: e => { state.department = e.target.value; } }, DEPARTMENTS.map(d => ({ value: d, label: deptLabel(d) })), state.department, "Select department")),
-      field("Quantity", numberInput(state.quantity_sent, v => state.quantity_sent = v, { min: "1", step: "1" })),
+      field("Quantity", numberInput(state.quantity_sent, v => { state.quantity_sent = v; paintCost(); }, { min: "1", step: "1" })),
       field("Sent Date", el("input", { type: "date", value: state.sent_date, oninput: e => state.sent_date = e.target.value })),
       field("Outsourced?", el("label", {}, [el("input", { type: "checkbox", ...(state.is_outsourced ? { checked: "checked" } : {}), onchange: e => { state.is_outsourced = e.target.checked; renderForm(); } }), " Yes"])),
     ]);
-    const outsourceRow = state.is_outsourced ? el("div", { class: "form-inline" }, [
-      field("Vendor", selectEl({ onchange: e => state.vendor = e.target.value }, MASTER.vendors.map(v => ({ value: v.id, label: v.company_name })), state.vendor, "Select vendor")),
-      field("Cost (Rs.)", numberInput(state.cost, v => state.cost = v, { min: "0", step: "0.01" })),
-    ]) : null;
+    let outsourceRow = null;
+    paintCost = () => {};
+    if (state.is_outsourced) {
+      const costHint = el("p", { class: "muted", style: "margin:0.2rem 0 0;" });
+      paintCost = () => {
+        const q = Number(state.quantity_sent) || 0, c = Number(state.cost_per_piece) || 0;
+        costHint.textContent = c ? `${q} pieces × ${fmtMoney(c)} = ${fmtMoney(q * c)} total cost` : "";
+      };
+      outsourceRow = el("div", {}, [
+        el("div", { class: "form-inline" }, [
+          field("Vendor", selectEl({ onchange: e => state.vendor = e.target.value }, MASTER.vendors.map(v => ({ value: v.id, label: v.company_name })), state.vendor, "Select vendor")),
+          field("Cost per piece (Rs.)", numberInput(state.cost_per_piece, v => { state.cost_per_piece = v; paintCost(); }, { min: "0", step: "0.01", placeholder: "e.g. 30.00 per piece" })),
+        ]),
+        costHint,
+      ]);
+      paintCost();
+    }
     const remarks = field("Remarks", el("input", { type: "text", value: state.remarks, oninput: e => state.remarks = e.target.value }));
     wrap.appendChild(el("div", { class: "card" }, [
       el("h3", {}, "Send Pieces to a Department"),
@@ -96,7 +110,7 @@
     try {
       const body = { order: Number(state.order), department: state.department, quantity_sent: Number(state.quantity_sent), sent_date: state.sent_date || null, is_outsourced: !!state.is_outsourced, remarks: state.remarks || "" };
       if (state.is_outsourced && state.vendor) body.vendor = Number(state.vendor);
-      if (state.is_outsourced && state.cost) body.cost = Number(state.cost);
+      if (state.is_outsourced && state.cost_per_piece) body.cost_per_piece = Number(state.cost_per_piece);
       await apiPost("/production/process-dispatches/", body);
       notify.success(`Sent to ${deptLabel(state.department)}.`);
       const keepOrder = state.order;

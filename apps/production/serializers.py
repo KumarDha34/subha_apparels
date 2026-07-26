@@ -9,8 +9,19 @@ from .models import BundleReceipt, ProductionQualityCheck, AccessoryIssue, Bundl
 class ProcessDispatchSerializer(serializers.ModelSerializer):
     order_number = serializers.CharField(source="order.order_number", read_only=True)
     party_name = serializers.CharField(source="order.party.name", read_only=True, default=None)
+    order_label = serializers.SerializerMethodField()
     vendor_name = serializers.CharField(source="vendor.company_name", read_only=True, default=None)
     department_display = serializers.CharField(source="get_department_display", read_only=True)
+
+    def get_order_label(self, obj):
+        if not obj.order_id:
+            return None
+        names = []
+        for it in obj.order.items.all():
+            n = it.product.name if it.product_id else None
+            if n and n not in names:
+                names.append(n)
+        return f"{obj.order.order_number} — {', '.join(names) if names else '—'}"
     loss_quantity = serializers.IntegerField(read_only=True)
     size_breakdown = serializers.SerializerMethodField()
     color_breakdown = serializers.SerializerMethodField()
@@ -32,18 +43,40 @@ class ProcessDispatchSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProcessDispatch
         fields = [
-            "id", "dispatch_number", "order", "order_number", "party_name", "department", "department_display",
+            "id", "dispatch_number", "order", "order_number", "party_name", "order_label", "department", "department_display",
             "quantity_sent", "sent_date", "sent_by", "quantity_received", "received_date", "received_by",
             "loss_reason", "loss_status", "loss_reviewed_by", "loss_reviewed_at", "loss_review_notes",
             "size_breakdown", "color_breakdown",
-            "is_outsourced", "vendor", "vendor_name", "cost", "loss_quantity", "status", "remarks",
+            "is_outsourced", "vendor", "vendor_name", "cost_per_piece", "cost", "loss_quantity", "status", "remarks",
             "created_at", "updated_at",
         ]
         read_only_fields = ["dispatch_number", "sent_by", "quantity_received", "received_date", "received_by",
                             "loss_reason", "loss_status", "loss_reviewed_by", "loss_reviewed_at", "loss_review_notes", "status"]
 
+    def validate(self, attrs):
+        # Guard the send: never let more pieces leave the floor than are
+        # actually available. Pieces currently OUT at a department must be
+        # received back before they can be sent to another department.
+        if self.instance is None:  # only on create (a new send)
+            order = attrs.get("order")
+            qty = attrs.get("quantity_sent") or 0
+            if qty <= 0:
+                raise serializers.ValidationError({"quantity_sent": "Enter at least 1 piece to send."})
+            available = ProcessDispatch.available_to_send(order.id if order else None)
+            if qty > available:
+                raise serializers.ValidationError({
+                    "quantity_sent": f"Only {available} piece(s) are available to send right now. "
+                                     f"Pieces already out at a department must be received back first "
+                                     f"before they can be sent onward."
+                })
+        return attrs
+
     def create(self, validated_data):
         validated_data["sent_by"] = self.context["request"].user
+        # Auto-calculate the total processing cost: rate/piece x pieces sent.
+        cpp = validated_data.get("cost_per_piece")
+        if cpp is not None and not validated_data.get("cost"):
+            validated_data["cost"] = cpp * validated_data.get("quantity_sent", 0)
         return super().create(validated_data)
 
 

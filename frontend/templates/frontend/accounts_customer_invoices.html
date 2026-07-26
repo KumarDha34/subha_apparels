@@ -59,7 +59,7 @@
     const rateInput = numberInput(state.unit, v => { state.unit = v; recompute(); paintCalc(); }, { min: "0", step: "0.01", placeholder: "selling rate per piece" });
 
     const form = el("div", { class: "form-inline" }, [
-      field("Order (dispatched)", selectEl({ onchange: e => onOrder(e.target.value) }, ORDERS.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "Select order")),
+      field("Order (dispatched)", selectEl({ onchange: e => onOrder(e.target.value) }, ORDERS.map(o => ({ value: o.id, label: o.order_label })), state.order, "Select order")),
       field("Invoice Date", el("input", { type: "date", value: state.invoice_date, oninput: e => state.invoice_date = e.target.value })),
       field("Due Date", el("input", { type: "date", class: "allow-past", value: state.due_date, oninput: e => state.due_date = e.target.value })),
     ]);
@@ -106,16 +106,48 @@
   // Build & print a full sales invoice. Line-item detail (product, qty, rate)
   // is reconstructed from the order and its dispatch, since the invoice itself
   // stores only the total amount.
+  // Full cost breakdown table for the invoice: materials, labour, each
+  // process (washing/printing/embroidery/finishing) and each additional charge.
+  function costBreakdownHtml(pnl, invoiceAmount, money) {
+    if (!pnl) return "";
+    const c = pnl.costs || {}, pc = pnl.process_costs || {}, ch = pnl.charge_costs || {};
+    const row = (label, val) => `<tr><td>${label}</td><td class="num">${money(val || 0)}</td></tr>`;
+    const rows = [
+      row(c.fabric_cost > 0 ? "Fabric" : "Fabric (Customer Supplied)", c.fabric_cost),
+      row("Accessories", c.accessory_cost),
+      row("Labour (Operator payments)", c.labor_cost),
+      row("Washing", pc.WASHING), row("Printing", pc.PRINTING),
+      row("Embroidery", pc.EMBROIDERY), row("Button", pc.BUTTON), row("Finishing", pc.FINISHING),
+      row("Transport", ch.TRANSPORT), row("Courier", ch.COURIER),
+      row("Customs Clearance", ch.CUSTOMS), row("Storage / Warehousing", ch.STORAGE),
+      row("Sample Development", ch.SAMPLE), row("Testing / Inspection", ch.TESTING),
+      row("Late Delivery Penalty", ch.PENALTY), row("Labour / Handling", ch.LABOUR),
+    ].join("");
+    const margin = pnl.margin_pct != null ? `${pnl.margin_pct}%` : "—";
+    return `
+      <div style="margin-top:1.3rem;font-weight:700;border-bottom:2px solid #333;padding-bottom:.2rem;text-transform:uppercase;font-size:.82rem;letter-spacing:.5px;">Cost Breakdown</div>
+      <table><thead><tr><th>Cost Component</th><th class="num">Amount</th></tr></thead><tbody>
+        ${rows}
+        <tr><th class="num">Total Cost</th><th class="num">${money(c.total_cost)}</th></tr>
+        <tr><td class="num">Invoice Amount</td><td class="num">${money(invoiceAmount)}</td></tr>
+        <tr><th class="num">Margin</th><th class="num">${margin}</th></tr>
+      </tbody></table>`;
+  }
+
   async function printInvoice(inv) {
     try {
-      const [order, dispatches] = await Promise.all([
+      const [order, dispatches, pnl] = await Promise.all([
         apiGet(`/orders/${inv.order}/`),
         fetchAll(`/finishing/dispatch/?order=${inv.order}`).catch(() => []),
+        apiGet(`/accounts/orders/${inv.order}/pnl/`).catch(() => null),
       ]);
       const disp = dispatches.find(d => d.quantity_dispatched != null) || dispatches[0];
       const qty = disp ? Number(disp.quantity_dispatched || 0) : 0;
       const amount = Number(inv.amount || 0);
-      const rate = qty ? amount / qty : amount;
+      const addCosts = inv.additional_costs || {};
+      const addTotal = Object.values(addCosts).reduce((s, v) => s + Number(v || 0), 0);
+      const baseAmount = amount - addTotal;
+      const rate = qty ? baseAmount / qty : baseAmount;
       const products = (order.items || []).map(it => `${it.product_name || "Item"} (${it.product_code || "—"})`);
       const desc = products.length ? products.join(", ") : (order.order_number || "Finished garments");
       const paid = Number(inv.paid_amount || 0), due = Number(inv.due_amount ?? (amount - paid));
@@ -146,7 +178,8 @@
         <table>
           <thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
           <tbody>
-            <tr><td>${desc}</td><td class="num">${qty || "—"}</td><td class="num">${money(rate)}</td><td class="num">${money(amount)}</td></tr>
+            <tr><td>${desc}</td><td class="num">${qty || "—"}</td><td class="num">${money(rate)}</td><td class="num">${money(baseAmount)}</td></tr>
+            ${Object.entries(addCosts).map(([label, val]) => `<tr><td>${label} <span style="color:#888;">(additional charge)</span></td><td class="num">—</td><td class="num">—</td><td class="num">${money(val)}</td></tr>`).join("")}
             <tr><th colspan="3" class="num">Total Amount</th><th class="num">${money(amount)}</th></tr>
             <tr><td colspan="3" class="num" style="border:none;">Paid</td><td class="num" style="border:none;">${money(paid)}</td></tr>
             <tr><td colspan="3" class="num" style="border:none;"><strong>Balance Due</strong></td><td class="num" style="border:none;"><strong>${money(due)}</strong></td></tr>
@@ -154,6 +187,7 @@
         </table>
         <div style="margin-top:1rem;font-size:0.92rem;">Payment Status: <strong>${inv.payment_status || "—"}</strong></div>
         ${inv.remarks ? `<div style="margin-top:0.3rem;font-size:0.85rem;color:#555;">Remarks: ${inv.remarks}</div>` : ""}
+        ${costBreakdownHtml(pnl, amount, money)}
         <div class="status">ORDER STATUS &nbsp;&mdash;&nbsp; ${statusChain} ✅</div>
         <div class="sign"><div>Prepared By — Subha Apparels</div><div>Received By — ${inv.party_name || "Customer"}</div></div>`;
       openPrintWindow(`Invoice ${inv.invoice_number || order.order_number}`, body);
@@ -187,6 +221,60 @@
     ]);
   }
 
+  // Common post-invoice extra charges billed on to the customer.
+  const COST_LABELS = ["Extra Transport", "Rush / Express Handling", "Rework / Alteration",
+    "Extra Packing", "Sampling", "Testing / Inspection", "Penalty", "Other"];
+
+  function openAddCost(inv) {
+    let label = COST_LABELS[0];
+    const labelSel = selectEl({ onchange: e => label = e.target.value },
+      COST_LABELS.map(l => ({ value: l, label: l })), label);
+    const customLabel = el("input", { type: "text", placeholder: "Custom label (used when 'Other')" });
+    const amt = numberInput("", () => {}, { min: "0.01", step: "0.01", placeholder: "e.g. 1500.00" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`➕ Add Cost — ${inv.invoice_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        `Add an extra cost incurred while producing this order. It is billed to the customer — the invoice total rises from ${fmtMoney(inv.amount)} and the balance due grows accordingly.`),
+      err,
+      el("div", { class: "form-inline" }, [field("Cost Type", labelSel), field("Amount (Rs.)", amt)]),
+      field("Custom Label", customLabel),
+    ], [
+      el("button", { type: "button", onclick: async () => {
+        const amount = Number(amt.value || 0);
+        if (!amount || amount <= 0) { err.textContent = "Enter an amount greater than zero."; err.style.display = "block"; return; }
+        const finalLabel = (label === "Other" && customLabel.value.trim()) ? customLabel.value.trim() : label;
+        try {
+          await apiPost(`/accounts/customer-invoices/${inv.id}/add-cost/`, { label: finalLabel, amount });
+          closeCrudModal(); notify.success(`Added ${fmtMoney(amount)} — invoice total updated.`); await load();
+        } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Add Cost"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  function viewDetails(inv) {
+    const add = inv.additional_costs || {};
+    const addRows = Object.entries(add);
+    const base = Number(inv.base_amount ?? (Number(inv.amount) - addRows.reduce((s, [, v]) => s + Number(v || 0), 0)));
+    const rows = [["Base Invoice Amount", fmtMoney(base)]];
+    addRows.forEach(([label, val]) => rows.push([`＋ ${label}`, fmtMoney(val)]));
+    rows.push(["Invoice Total", el("strong", {}, fmtMoney(inv.amount))]);
+    rows.push(["Amount Paid", el("span", { style: "color:#1a7f4b;" }, fmtMoney(inv.paid_amount))]);
+    rows.push(["Balance Due", el("strong", { style: `color:${Number(inv.due_amount) > 0 ? "#b3261e" : "#1a7f4b"};` }, fmtMoney(inv.due_amount))]);
+    const footer = [
+      el("button", { type: "button", onclick: () => { closeCrudModal(); openAddCost(inv); } }, "➕ Add Cost"),
+      Number(inv.due_amount) > 0 ? el("button", { class: "secondary", type: "button", onclick: () => { closeCrudModal(); openPayment(inv); } }, "💵 Record Payment") : null,
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close"),
+    ].filter(Boolean);
+    showCrudModal(`🧾 ${inv.invoice_number} — ${inv.party_name || ""}`, [
+      detailGrid([["Order", inv.order_number], ["Date", inv.invoice_date], ["Due Date", inv.due_date || "—"],
+        ["Status", badge(inv.payment_status)]]),
+      el("div", { class: "section-title" }, "Amount Breakdown"),
+      detailGrid(rows),
+      addRows.length ? null : el("p", { class: "muted", style: "margin-top:0.5rem;" }, "No additional costs added yet."),
+    ].filter(Boolean), footer, { wide: true });
+  }
+
   async function load() {
     const [orders, invoices] = await Promise.all([fetchAll("/orders/"), fetchAll("/accounts/customer-invoices/")]);
     ORDERS = orders.filter(o => ["DISPATCHED", "DELIVERED"].includes(o.status));
@@ -203,8 +291,14 @@
         { label: "Paid", value: i => Number(i.paid_amount), render: i => fmtMoney(i.paid_amount) },
         { label: "Due", value: i => Number(i.due_amount), render: i => fmtMoney(i.due_amount) },
         { label: "Status", value: i => i.payment_status, render: i => badge(i.payment_status) },
+        { label: "Extra Charges", value: i => Number(i.additional_total || 0),
+          render: i => Number(i.additional_total || 0) > 0
+            ? el("span", { title: "Additional charges billed after the invoice was raised", style: "color:#b4690e;" }, "+" + fmtMoney(i.additional_total))
+            : el("span", { class: "muted" }, "—") },
         { label: "Action", sortable: false, render: i => el("div", { class: "form-inline" }, [
+            el("button", { class: "secondary", type: "button", onclick: () => viewDetails(i) }, "View"),
             el("button", { type: "button", onclick: () => printInvoice(i) }, "Print"),
+            el("button", { class: "secondary", type: "button", onclick: () => openAddCost(i) }, "Add Cost"),
             Number(i.due_amount) > 0 ? el("button", { class: "secondary", type: "button", onclick: () => openPayment(i) }, "Record Payment") : null,
           ]) },
       ], rows: invoices, pageSize: 12, initialSort: { key: "invoice_number", dir: "desc" },

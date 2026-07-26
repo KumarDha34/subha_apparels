@@ -2,8 +2,10 @@
 {% block title %}Income & Expenses - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Income &amp; Expenses</h2>
-  <p class="page-subtitle">Client payments (advance/final) and operational expenses not tied to a purchase order.</p>
+  <p class="page-subtitle">Client payments (advance/final) and operational expenses. Filter by a specific order to see only its income and expenses with a net total.</p>
 
+  <div id="filter-card"></div>
+  <div id="order-view"></div>
   <div id="panels"></div>
 {% endblock %}
 
@@ -11,6 +13,69 @@
 <script>
   Auth.guardPage(["ACCOUNTS"]);
   renderShell("accounts-income-expenses", "Income & Expenses");
+
+  let ORDERS = [];
+
+  function tile(label, value, tone) {
+    const c = tone === "good" ? "#1a7f4b" : tone === "bad" ? "#b3261e" : "var(--text,#333)";
+    return el("div", { class: "card stat", style: "text-align:center;" }, [
+      el("div", { class: "value", style: `color:${c};` }, fmtMoney(value)), el("div", { class: "label" }, label)]);
+  }
+
+  async function showForOrder(orderId) {
+    const view = document.getElementById("order-view"); view.innerHTML = "";
+    document.getElementById("panels").style.display = orderId ? "none" : "";
+    if (!orderId) return;
+    const o = ORDERS.find(x => String(x.id) === String(orderId)) || {};
+    let income, expenses;
+    try {
+      [income, expenses] = await Promise.all([
+        fetchAll(`/accounts/income/?order=${orderId}`),
+        fetchAll(`/accounts/expenses/?order=${orderId}`),
+      ]);
+    } catch (e) { view.innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    const inc = income.reduce((s, r) => s + Number(r.amount || 0), 0);
+    const exp = expenses.reduce((s, r) => s + Number(r.amount || 0), 0);
+
+    view.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, `📄 ${o.order_label || o.order_number || "Order"} — Income & Expenses`),
+      el("div", { style: "display:flex;gap:0.6rem;flex-wrap:wrap;" }, [
+        tile("Income received", inc, "good"), tile("Expenses", exp, "bad"), tile("Net", inc - exp, (inc - exp) >= 0 ? "good" : "bad")]),
+    ]));
+
+    const incBody = el("div", {});
+    view.appendChild(el("div", { class: "card" }, [el("h3", {}, `Client Income (${income.length})`), incBody]));
+    dataTable(incBody, {
+      columns: [
+        { label: "Type", value: r => r.income_type, render: r => badge(r.income_type) },
+        { label: "Amount", value: r => Number(r.amount), render: r => fmtMoney(r.amount) },
+        { label: "Method", value: r => r.payment_method || "", render: r => r.payment_method || "—" },
+        { label: "Reference", value: r => r.reference || "", render: r => r.reference || "—" },
+        { label: "Date", key: "received_date" },
+      ], rows: income, pageSize: 8, emptyText: "No income recorded for this order.",
+    });
+
+    const expBody = el("div", {});
+    view.appendChild(el("div", { class: "card" }, [el("h3", {}, `Expenses (${expenses.length})`), expBody]));
+    dataTable(expBody, {
+      columns: [
+        { label: "Category", value: r => r.category, render: r => badge(r.category) },
+        { label: "Amount", value: r => Number(r.amount), render: r => fmtMoney(r.amount) },
+        { label: "Remarks", sortable: false, render: r => r.remarks || "—" },
+        { label: "Date", key: "expense_date" },
+      ], rows: expenses, pageSize: 8, emptyText: "No expenses recorded for this order.",
+    });
+  }
+
+  function renderFilter() {
+    const wrap = document.getElementById("filter-card"); wrap.innerHTML = "";
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "form-inline" }, [
+        field("🔎 View a specific order", selectEl({ onchange: e => showForOrder(e.target.value) },
+          ORDERS.map(o => ({ value: o.id, label: o.order_label })), "", "All orders (manage below)")),
+      ]),
+    ]));
+  }
 
   const panels = document.getElementById("panels");
 
@@ -24,7 +89,7 @@
       { key: "received_date", label: "Date" },
     ],
     fields: [
-      { name: "order", label: "Order", type: "select", optionsEndpoint: "/orders/", optionsLabel: "order_number" },
+      { name: "order", label: "Order", type: "select", optionsEndpoint: "/orders/", optionsLabel: "order_label" },
       { name: "income_type", label: "Type", type: "select", choices: ["ADVANCE", "FINAL", "OTHER"], required: true },
       { name: "amount", label: "Amount", type: "number", required: true },
       { name: "received_date", label: "Received Date", type: "date", required: true, allowPast: true },
@@ -49,6 +114,11 @@
     ],
     editable: true,
   });
+
+  (async function init() {
+    ORDERS = await fetchAll("/orders/").catch(() => []);
+    renderFilter();
+  })();
 </script>
 {% endblock %}
 

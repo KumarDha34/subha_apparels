@@ -39,16 +39,44 @@ class OrderItemSerializer(serializers.ModelSerializer):
 
 class OrderSerializer(serializers.ModelSerializer):
     party_name = serializers.CharField(source="party.name", read_only=True)
+    # Distinct product name(s) on the order, plus a ready-made "ORDER — Product"
+    # label used by every order dropdown so the picker shows what it is.
+    product_summary = serializers.SerializerMethodField()
+    order_label = serializers.SerializerMethodField()
+    order_category_display = serializers.CharField(source="get_order_category_display", read_only=True)
+    sample_status_display = serializers.CharField(source="get_sample_status_display", read_only=True)
+    can_decide_sample = serializers.SerializerMethodField()
     items = OrderItemSerializer(many=True)
 
     class Meta:
         model = Order
         fields = [
-            "id", "order_number", "party", "party_name", "order_date", "order_type",
+            "id", "order_number", "party", "party_name", "product_summary", "order_label",
+            "order_date", "order_type", "order_category", "order_category_display",
+            "sample_status", "sample_status_display", "sample_decided_date", "sample_feedback", "can_decide_sample",
             "is_repeat", "remarks", "cutting_instruction", "total_order_amount", "status", "created_by",
             "items", "created_at", "updated_at",
         ]
-        read_only_fields = ["order_number", "created_by", "status", "total_order_amount"]
+        read_only_fields = ["order_number", "created_by", "status", "total_order_amount",
+                            "sample_status", "sample_decided_date", "sample_feedback"]
+
+    def get_can_decide_sample(self, obj):
+        # A sample can be approved/rejected only once it has left the floor
+        # (dispatched or into financial closure) -- i.e. finished completely.
+        return (obj.order_category == Order.OrderCategory.SAMPLE
+                and obj.status in Order.DISPATCHED_OR_BEYOND)
+
+    def get_product_summary(self, obj):
+        names = []
+        for it in obj.items.all():
+            n = it.product.name if it.product_id else None
+            if n and n not in names:
+                names.append(n)
+        return ", ".join(names) if names else "—"
+
+    def get_order_label(self, obj):
+        tag = "[SAMPLE] " if obj.order_category == Order.OrderCategory.SAMPLE else ""
+        return f"{tag}{obj.order_number} — {self.get_product_summary(obj)}"
 
     def validate(self, attrs):
         order_type = attrs.get("order_type", getattr(self.instance, "order_type", None))
@@ -65,8 +93,10 @@ class OrderSerializer(serializers.ModelSerializer):
                 lines = color.get("size_lines") or []
                 if not lines:
                     raise serializers.ValidationError({"items": "Each color needs at least one size row."})
-                if order_type == Order.OrderType.RATIO_BASED and not color.get("rolls"):
-                    raise serializers.ValidationError({"items": "Each color needs at least one roll for RATIO_BASED orders."})
+                # Rolls are optional for every order type -- Merchandising may
+                # pick the customer-supplied/vendor rolls now, or leave it to
+                # Store to issue fabric later. When rolls ARE picked, the rules
+                # below still apply.
                 for roll in color.get("rolls") or []:
                     # Rule 1: customer-supplied rolls are earmarked for that
                     # customer's own order(s) -- not spendable on another party's.
@@ -120,6 +150,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def _save(self, order, validated_data, is_new=False):
         items_data = validated_data.pop("items")
+        assigned_rolls = []
         with transaction.atomic():
             for k, v in validated_data.items():
                 setattr(order, k, v)
@@ -135,7 +166,12 @@ class OrderSerializer(serializers.ModelSerializer):
                     color = OrderItemColor.objects.create(order_item=item, **color_data)
                     if rolls:
                         color.rolls.set(rolls)
+                        assigned_rolls.extend(rolls)
                     OrderItemColorSize.objects.bulk_create(
                         OrderItemColorSize(order_item_color=color, **line) for line in lines_data
                     )
+        # Scenario 1: rolls picked at order creation -> notify Store to issue them.
+        if is_new and assigned_rolls:
+            from apps.users.services import notify_store_roll_assigned
+            notify_store_roll_assigned(order, assigned_rolls)
         return order

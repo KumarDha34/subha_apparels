@@ -7,6 +7,15 @@
   <div class="grid grid-4" id="stat-cards"></div>
 
   <div class="card">
+    <div class="crud-header">
+      <h3>🔔 Notifications</h3>
+      <button id="notif-mark-all" class="secondary" type="button">Mark all read</button>
+    </div>
+    <p class="card-subtitle">New roll assignments from Merchandising and other hand-offs land here. Click <em>Open</em> to go straight to the fabric stock and issue it.</p>
+    <div id="notif-list" class="muted">Loading…</div>
+  </div>
+
+  <div class="card">
     <h3>Recent Stock Activity</h3>
     <div id="recent-activity" class="muted">Loading...</div>
   </div>
@@ -79,6 +88,41 @@
       }
     } catch (e) { document.getElementById("recent-activity").textContent = "Unavailable."; }
   }
+
+  async function loadNotifications() {
+    const box = document.getElementById("notif-list");
+    try {
+      const items = await fetchAll("/users/notifications/my/");
+      box.innerHTML = "";
+      if (!items.length) { box.appendChild(el("p", { class: "muted" }, "No notifications yet.")); return; }
+      const list = el("div", {});
+      items.slice(0, 15).forEach(n => {
+        list.appendChild(el("div", {
+          style: `display:flex;justify-content:space-between;gap:1rem;align-items:center;padding:0.6rem 0.2rem;border-bottom:1px solid var(--border,#eee);${n.is_read ? "" : "font-weight:600;"}`,
+        }, [
+          el("div", { style: "display:flex;align-items:center;gap:0.5rem;" }, [
+            n.is_read ? el("span", { style: "width:8px;height:8px;" }) : el("span", { style: "width:8px;height:8px;border-radius:50%;background:var(--brand,#c0392b);display:inline-block;" }),
+            el("span", {}, n.message),
+          ]),
+          el("div", { class: "form-inline", style: "white-space:nowrap;" }, [
+            el("span", { class: "muted", style: "font-size:0.8rem;" }, (n.created_at || "").slice(0, 16).replace("T", " ")),
+            n.link ? el("button", { class: "secondary", type: "button", onclick: async () => {
+              try { if (!n.is_read) await apiPost(`/users/notifications/${n.id}/mark_read/`, {}); } catch (e) {}
+              location.href = n.link;
+            } }, "Open") : null,
+          ]),
+        ]));
+      });
+      box.appendChild(list);
+    } catch (e) { box.textContent = "Could not load notifications."; }
+  }
+
+  document.getElementById("notif-mark-all").onclick = async () => {
+    try { await apiPost("/users/notifications/mark_all_read/", {}); notify.success("All notifications marked read."); loadNotifications(); }
+    catch (e) { notify.error(e.message); }
+  };
+
   loadOverview();
+  loadNotifications();
 </script>
 {% endblock %}

@@ -8,23 +8,43 @@ class Operator(TimeStampedModel):
         INDIVIDUAL = "INDIVIDUAL", "Individual"
         GROUP = "GROUP", "Group"
 
-    class SkillLevel(models.TextChoices):
-        BEGINNER = "BEGINNER", "Beginner"
-        INTERMEDIATE = "INTERMEDIATE", "Intermediate"
-        EXPERT = "EXPERT", "Expert"
-
     operator_type = models.CharField(max_length=20, choices=OperatorType.choices)
     name = models.CharField(max_length=200)
     contact = models.CharField(max_length=20, blank=True)
     email = models.EmailField(blank=True)
     address = models.TextField(blank=True)
-    skill_level = models.CharField(max_length=20, choices=SkillLevel.choices, blank=True)
     is_active = models.BooleanField(default=True)
     joined_date = models.DateField(null=True, blank=True)
-    # Optional link to a login account for operators who use the system themselves.
-    user_account = models.OneToOneField("users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="operator_profile")
+    is_group_leader = models.BooleanField(default=False)
+    group = models.ForeignKey(
+        "self", 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name="members",
+        limit_choices_to={'operator_type': 'GROUP'},
+        help_text="If this operator is part of a group, select the group here."
+    )
+    
+    user_account = models.OneToOneField(
+        "users.User", 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name="operator_profile"
+    )
+
+    @property
+    def member_count(self):
+        return self.members.filter(is_active=True).count()
+
+    @property
+    def member_list(self):
+        return self.members.filter(is_active=True)
 
     def __str__(self):
+        if self.operator_type == "GROUP":
+            return f"{self.name} (Group - {self.member_count} members)"
         return f"{self.name} ({self.get_operator_type_display()})"
 
 
@@ -51,6 +71,7 @@ class BundleAssignment(TimeStampedModel):
     rate_per_piece = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
         help_text="Per-piece pay rate agreed with the operator, set by Production at allocation; total pay = rate x pieces returned.")
     returned_quantity = models.PositiveIntegerField(null=True, blank=True, help_text="Pieces the operator actually returned.")
+    paid_quantity = models.PositiveIntegerField(default=0, help_text="Of the returned pieces, how many have already been paid to the operator.")
     shortage_reason = models.TextField(blank=True)
     shortage_reason_status = models.CharField(max_length=20, choices=ShortageStatus.choices, default=ShortageStatus.NOT_APPLICABLE)
     shortage_reviewed_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="shortage_reviews")

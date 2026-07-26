@@ -4,8 +4,10 @@ from .views import (
     PurchaseOrderViewSet, InvoiceViewSet, PaymentRecordViewSet,
     IncomeRecordViewSet, ExpenseRecordViewSet, AccountsSummaryView, OrderPnLView,
     ManagementKPIView, QuotationViewSet, CustomerInvoiceViewSet, PartyStatementView,
+    SupplierStatementView,
 )
 from .reports import AdminReportView
+from .product_pnl import ProductPnLListView, ProductPnLDetailView
 
 router = DefaultRouter()
 router.register("purchase-orders", PurchaseOrderViewSet, basename="purchase-order")
@@ -22,4 +24,7 @@ urlpatterns = [
     path("report/", AdminReportView.as_view(), name="admin-report"),
     path("orders/<int:pk>/pnl/", OrderPnLView.as_view(), name="order-pnl"),
     path("party-statement/", PartyStatementView.as_view(), name="party-statement"),
+    path("supplier-statement/", SupplierStatementView.as_view(), name="supplier-statement"),
+    path("product-pnl/", ProductPnLListView.as_view(), name="product-pnl-list"),
+    path("product-pnl/<int:pk>/", ProductPnLDetailView.as_view(), name="product-pnl-detail"),
 ] + router.urls

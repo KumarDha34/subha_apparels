@@ -87,23 +87,74 @@ def r_product_gallery():
 
 
 def r_product_pnl():
+    """Full per-style cost picture: pieces produced, operator payments (per
+    operator), and outsourced/processing cost (washing/printing/embroidery/
+    finishing), attributed to each product by its share of the order's pieces.
+    Click a row for the operator + process breakdown."""
+    from collections import defaultdict
     from apps.operators.models import BundleAssignment
     from apps.operators.services import assignment_labor_cost
-    agg = {}
-    for a in BundleAssignment.objects.filter(status__in=["COMPLETED", "QUALITY_CHECKED"]).select_related("bundle__cutting_order__order_item__product"):
-        oi = a.bundle.cutting_order.order_item if a.bundle.cutting_order else None
+    from apps.production.models import ProcessDispatch
+
+    prod = {}                                   # product_id -> aggregate
+    order_prod_pieces = defaultdict(lambda: defaultdict(int))  # order_id -> product_id -> pieces
+    for a in (BundleAssignment.objects.filter(status__in=["COMPLETED", "QUALITY_CHECKED"])
+              .select_related("bundle__cutting_order__order_item__product", "bundle__cutting_order__order", "operator")):
+        co = a.bundle.cutting_order
+        oi = co.order_item if co else None
         if not oi or not oi.product_id:
             continue
-        g = agg.setdefault(oi.product_id, {"code": oi.product.code, "name": oi.product.name, "pieces": 0, "labor": Decimal("0")})
-        g["pieces"] += a.returned_quantity or 0
-        g["labor"] += assignment_labor_cost(a)
-    rows = [{"code": g["code"], "name": g["name"], "pieces": g["pieces"], "labor": float(g["labor"]),
-             "avg": round(float(g["labor"]) / g["pieces"], 2) if g["pieces"] else 0} for g in agg.values()]
-    return dict(title="Product P&L", description="Pieces produced and operator labour cost per style.",
+        pid = oi.product_id
+        g = prod.setdefault(pid, {"code": oi.product.code, "name": oi.product.name, "pieces": 0,
+                                  "labor": Decimal("0"), "outsourced": Decimal("0"),
+                                  "operators": defaultdict(lambda: {"pieces": 0, "pay": Decimal("0")}),
+                                  "processes": defaultdict(lambda: Decimal("0"))})
+        pcs = a.returned_quantity or 0
+        cost = assignment_labor_cost(a)
+        g["pieces"] += pcs
+        g["labor"] += cost
+        g["operators"][a.operator.name]["pieces"] += pcs
+        g["operators"][a.operator.name]["pay"] += cost
+        if co and co.order_id:
+            order_prod_pieces[co.order_id][pid] += pcs
+
+    # Split each order's processing cost across its products by piece share.
+    for pd in ProcessDispatch.objects.select_related("order"):
+        if not pd.order_id or not pd.cost:
+            continue
+        shares = order_prod_pieces.get(pd.order_id, {})
+        total = sum(shares.values())
+        if not total:
+            continue
+        for pid, pcs in shares.items():
+            if pid in prod:
+                share = pd.cost * Decimal(pcs) / Decimal(total)
+                prod[pid]["outsourced"] += share
+                prod[pid]["processes"][pd.get_department_display()] += share
+
+    detail_cols = [{"key": "item", "label": "Item"}, {"key": "pieces", "label": "Pieces"},
+                   {"key": "amount", "label": "Amount", "type": "money"}]
+    rows = []
+    for g in prod.values():
+        total_cost = g["labor"] + g["outsourced"]
+        detail = [{"item": f"Operator — {n}", "pieces": v["pieces"], "amount": _m(v["pay"])}
+                  for n, v in sorted(g["operators"].items())]
+        detail += [{"item": f"Process — {d}", "pieces": "", "amount": _m(c)}
+                   for d, c in sorted(g["processes"].items())]
+        rows.append({"code": g["code"], "name": g["name"], "pieces": g["pieces"],
+                     "labor": _m(g["labor"]), "outsourced": _m(g["outsourced"]), "total_cost": _m(total_cost),
+                     "avg": round(_m(g["labor"]) / g["pieces"], 2) if g["pieces"] else 0,
+                     "detail": detail, "detail_title": f"Cost breakdown — {g['code']} {g['name']}",
+                     "detail_columns": detail_cols})
+    return dict(title="Product P&L",
+                description="Per style: pieces produced, operator payments and outsourced/processing cost, with the full operator + process breakdown on click.",
                 summary=[{"label": "Total Pieces", "value": sum(r["pieces"] for r in rows)},
-                         {"label": "Total Labour", "value": sum(r["labor"] for r in rows), "kind": "warning"}],
+                         {"label": "Operator Payments", "value": sum(r["labor"] for r in rows), "kind": "warning"},
+                         {"label": "Outsourced / Processing", "value": sum(r["outsourced"] for r in rows), "kind": "warning"},
+                         {"label": "Total Cost", "value": sum(r["total_cost"] for r in rows), "kind": "danger"}],
                 columns=[col("code", "Code"), col("name", "Style"), col("pieces", "Pieces"),
-                         col("labor", "Operator Labour", "money"), col("avg", "Avg Rate/pc", "money")],
+                         col("labor", "Operator Payments", "money"), col("outsourced", "Outsourced/Processing", "money"),
+                         col("total_cost", "Total Cost", "money"), col("avg", "Avg Rate/pc", "money")],
                 rows=sorted(rows, key=lambda r: -r["pieces"]))
 
 

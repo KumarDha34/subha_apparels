@@ -1,4 +1,5 @@
 from django.db.models import Sum
+from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -123,6 +124,25 @@ class OrderViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Order is already cancelled."}, status=400)
         order.status = Order.Status.CANCELLED
         order.save(update_fields=["status", "updated_at"])
+        return Response(self.get_serializer(order).data)
+
+    @action(detail=True, methods=["post"], url_path="sample-decision")
+    def sample_decision(self, request, pk=None):
+        """Record the client's verdict on a Sample order (Approve / Reject),
+        allowed only once the sample has been dispatched/completed. Captures the
+        decision, an optional feedback note, and the decision date."""
+        order = self.get_object()
+        if order.order_category != Order.OrderCategory.SAMPLE:
+            return Response({"detail": "Only sample orders can be approved or rejected."}, status=400)
+        if order.status not in Order.DISPATCHED_OR_BEYOND:
+            return Response({"detail": "A sample can only be decided once it has been dispatched / completed."}, status=400)
+        decision = (request.data.get("decision") or "").upper()
+        if decision not in (Order.SampleApproval.APPROVED, Order.SampleApproval.REJECTED):
+            return Response({"detail": "decision must be APPROVED or REJECTED."}, status=400)
+        order.sample_status = decision
+        order.sample_feedback = (request.data.get("feedback") or "").strip()
+        order.sample_decided_date = timezone.localdate()
+        order.save(update_fields=["sample_status", "sample_feedback", "sample_decided_date", "updated_at"])
         return Response(self.get_serializer(order).data)
 
     @action(detail=True, methods=["get"], url_path="loss-breakdown")

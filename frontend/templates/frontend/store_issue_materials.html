@@ -27,7 +27,7 @@
     return `${r.fabric_type_name} / ${r.color_name} — ${r.roll_number || "Roll #" + r.id} (${r.available_quantity} ${r.unit} available)` +
       (r.supplied_by_party_name ? ` · Customer Supplied: ${r.supplied_by_party_name}` : (r.vendor_name ? ` · Vendor: ${r.vendor_name}` : ""));
   }
-  const orderLabel = o => `${o.order_number} — ${o.party_name}`;
+  const orderLabel = o => o.order_label;
 
   async function loadMasterData() {
     const [orders, rolls] = await Promise.all([

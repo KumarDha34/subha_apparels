@@ -2,9 +2,9 @@
 {% block title %}Products - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Products / Styles</h2>
-  <p class="page-subtitle">Product codes are generated automatically — first 2 letters of the name, the current Nepali month, and a sequence that resets every month (e.g. TE-ASH-001). Set the type, category and fabric options, then use <strong>Files</strong> to upload a product image and a measurement-chart PDF (both optional). Open <strong>Overview</strong> for the full style spec.</p>
+  <p class="page-subtitle">Click <strong>Add Product</strong> to create a product in a popup — enter the name, image and size-wise measurements. Codes are auto-generated (e.g. TE-ASH-001).</p>
 
-  <div id="panel"></div>
+  <div id="list-wrap"></div>
 {% endblock %}
 
 {% block scripts %}
@@ -12,141 +12,141 @@
   Auth.guardPage(["MERCHANDISE"]);
   renderShell("merch-products", "Products");
 
-  // --- Upload optional image + measurement-chart PDF (multipart) ---
-  function openFiles(p, refresh) {
-    const imgInput = el("input", { type: "file", accept: "image/*" });
-    const pdfInput = el("input", { type: "file", accept: "application/pdf,.pdf" });
-    const err = el("div", { class: "error-msg", style: "display:none;" });
-    const current = [];
-    if (p.image_display_url) current.push(el("div", { class: "muted", style: "margin:0.2rem 0;" }, [
-      "Current image: ", el("a", { href: p.image_display_url, target: "_blank", rel: "noopener" }, "view")]));
-    if (p.measurement_chart_display_url) current.push(el("div", { class: "muted", style: "margin:0.2rem 0;" }, [
-      "Current chart: ", el("a", { href: p.measurement_chart_display_url, target: "_blank", rel: "noopener" }, "view")]));
-
-    const save = async () => {
-      err.style.display = "none";
-      const fd = new FormData();
-      if (imgInput.files[0]) fd.append("image", imgInput.files[0]);
-      if (pdfInput.files[0]) fd.append("measurement_chart_file", pdfInput.files[0]);
-      // FormData has no public length; check the two inputs directly.
-      if (!imgInput.files[0] && !pdfInput.files[0]) {
-        err.textContent = "Choose an image and/or a PDF to upload."; err.style.display = "block"; return;
-      }
-      try {
-        await apiUpload(`/master/products/${p.id}/`, fd, "PATCH");
-        closeCrudModal(); notify.success("Files uploaded."); refresh();
-      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
-    };
-    showCrudModal(`Upload Files — ${p.code} ${p.name}`, [
-      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, "Both files are optional. Uploading replaces any existing file."),
-      ...current, err,
-      field("Product Image (optional)", imgInput),
-      field("Measurement Chart — PDF (optional)", pdfInput),
-    ], [
-      el("button", { type: "button", onclick: save }, "Upload"),
-      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
-    ]);
+  // ---------- measurement chart helpers ----------
+  const blankRow = () => ({ param: "", sizes: "" });
+  function chartToRows(chart) {
+    return (chart || []).map(r => ({ param: r.param || "", sizes: Object.entries(r.sizes || {}).map(([k, v]) => `${k}:${v}`).join(", ") }));
   }
-
-  // --- Product Overview modal — the full style spec at a glance ---
-  function overviewRow(label, valueNode) {
-    return el("tr", {}, [
-      el("th", { style: "text-align:left;padding:0.5rem 0.9rem;white-space:nowrap;vertical-align:top;color:var(--muted,#666);font-weight:600;" }, label),
-      el("td", { style: "padding:0.5rem 0.9rem;vertical-align:top;" }, valueNode),
-    ]);
-  }
-  function openOverview(p) {
-    const img = p.image_display_url
-      ? el("img", { src: p.image_display_url, style: "width:120px;height:120px;object-fit:cover;border-radius:10px;background:#faf7f5;border:1px solid var(--border,#eee);" })
-      : el("span", { class: "muted" }, "No image uploaded");
-    const chart = p.measurement_chart_display_url
-      ? el("a", { href: p.measurement_chart_display_url, target: "_blank", rel: "noopener" }, "📄 View measurement chart")
-      : ((p.measurement_chart || []).length
-          ? `Size chart — ${(p.measurement_chart || []).length} measurement row(s)`
-          : el("span", { class: "muted" }, "—"));
-    const fabrics = (p.fabric_type_names && p.fabric_type_names.length)
-      ? p.fabric_type_names.join(", ")
-      : el("span", { class: "muted" }, "—");
-    const table = el("table", { style: "width:100%;border-collapse:collapse;" }, el("tbody", {}, [
-      overviewRow("Product Name", p.name || "—"),
-      overviewRow("Product Code", `${p.code} (auto-generated)`),
-      overviewRow("Product Type", p.product_type || "—"),
-      overviewRow("Category", p.category || el("span", { class: "muted" }, "—")),
-      overviewRow("Image", img),
-      overviewRow("Measurement Chart", chart),
-      overviewRow("Fabric Type Options", fabrics),
-      overviewRow("Status", badge(p.is_active ? "Active" : "Inactive")),
-      p.description ? overviewRow("Description", p.description) : null,
-    ].filter(Boolean)));
-    showCrudModal(`Product Overview — ${p.code}`, [table], [
-      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close"),
-    ], { wide: true });
-  }
-
-  // --- size-wise measurement chart editor (one line per measurement) ---
-  function chartToText(chart) {
-    return (chart || []).map(r => {
-      const sizes = Object.entries(r.sizes || {}).map(([k, v]) => `${k}:${v}`).join(", ");
-      return `${r.param || ""} | ${sizes}`;
-    }).join("\n");
-  }
-  function textToChart(text) {
-    return String(text || "").split("\n").map(line => line.trim()).filter(Boolean).map(line => {
-      const [param, rest] = line.split("|");
+  function rowsToChart(rows) {
+    return rows.filter(r => (r.param || "").trim()).map(r => {
       const sizes = {};
-      (rest || "").split(",").forEach(pair => {
+      (r.sizes || "").split(",").forEach(pair => {
         const [k, v] = pair.split(":").map(s => (s || "").trim());
         if (k) sizes[k.toUpperCase()] = v ?? "";
       });
-      return { param: (param || "").trim(), sizes };
+      return { param: r.param.trim(), sizes };
     });
   }
-  function openMeasurements(item, refresh) {
-    const ta = el("textarea", { rows: "8", style: "width:100%;font-family:monospace;", value: chartToText(item.measurement_chart) });
+
+  // ---------- create / edit product (popup modal) ----------
+  function openProductModal(existing) {
+    const st = {
+      name: existing?.name || "",
+      chart: existing ? (chartToRows(existing.measurement_chart).length ? chartToRows(existing.measurement_chart) : [blankRow()]) : [blankRow()],
+    };
+    let imgFile = null;
+
     const err = el("div", { class: "error-msg", style: "display:none;" });
+    const nameInput = el("input", { type: "text", value: st.name, placeholder: "e.g. Classic Crew Tee", oninput: e => st.name = e.target.value });
+    const imgInput = el("input", { type: "file", accept: "image/*", onchange: e => { imgFile = e.target.files[0] || null; } });
+    const imgHint = el("div", { class: "muted", style: "margin-top:0.2rem;" },
+      existing?.image_display_url ? "An image is already uploaded — choosing a new one replaces it." : "");
+    const chartBox = el("div", {});
+
+    function renderChart() {
+      chartBox.innerHTML = "";
+      const table = el("table", { class: "data-table" });
+      table.appendChild(el("thead", {}, el("tr", {}, ["Measurement", "Sizes (e.g. S:38, M:40, L:42)", ""].map(h => el("th", {}, h)))));
+      const tb = el("tbody");
+      st.chart.forEach((row, i) => {
+        tb.appendChild(el("tr", {}, [
+          el("td", {}, el("input", { type: "text", value: row.param, placeholder: "e.g. Chest (in)", style: "width:100%;", oninput: e => row.param = e.target.value })),
+          el("td", {}, el("input", { type: "text", value: row.sizes, placeholder: "S:38, M:40, L:42", style: "width:100%;", oninput: e => row.sizes = e.target.value })),
+          el("td", {}, removeIconBtn("Remove", st.chart.length <= 1, () => { st.chart.splice(i, 1); renderChart(); })),
+        ]));
+      });
+      table.appendChild(tb);
+      chartBox.append(table, el("button", { class: "secondary", type: "button", style: "margin-top:0.4rem;", onclick: () => { st.chart.push(blankRow()); renderChart(); } }, "+ Add Measurement"));
+    }
+    renderChart();
+
     const save = async () => {
+      err.style.display = "none";
+      if (!st.name.trim()) { err.textContent = "Enter a product name."; err.style.display = "block"; return; }
       try {
-        await apiPatch(`/master/products/${item.id}/`, { measurement_chart: textToChart(ta.value) });
-        closeCrudModal(); notify.success("Measurement chart saved."); refresh();
+        const saved = existing
+          ? await apiPatch(`/master/products/${existing.id}/`, { name: st.name.trim(), measurement_chart: rowsToChart(st.chart) })
+          : await apiPost("/master/products/", { name: st.name.trim(), measurement_chart: rowsToChart(st.chart) });
+        if (imgFile) {
+          const fd = new FormData(); fd.append("image", imgFile);
+          await apiUpload(`/master/products/${saved.id}/`, fd, "PATCH");
+        }
+        closeCrudModal();
+        notify.success(existing ? "Product updated." : `Product ${saved.code} created.`);
+        loadProducts();
       } catch (e) { err.textContent = e.message; err.style.display = "block"; }
     };
-    showCrudModal(`Measurements — ${item.code} ${item.name}`, [
-      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
-        "One measurement per line as  Param | S:val, M:val, L:val  — e.g.  Chest (in) | S:38, M:40, L:42"),
-      err, ta,
+
+    showCrudModal(existing ? `✏️ Edit ${existing.code}` : "➕ New Product", [
+      err,
+      field("Product Name", nameInput),
+      field("Product Image", el("div", {}, [imgInput, imgHint])),
+      el("div", { class: "section-title" }, "Measurements (size-wise)"),
+      el("p", { class: "muted", style: "margin:-0.3rem 0 0.4rem;" }, "One row per measurement; enter values per size like S:38, M:40, L:42."),
+      chartBox,
     ], [
-      el("button", { type: "button", onclick: save }, "Save Chart"),
+      el("button", { type: "button", onclick: save }, existing ? "Save Changes" : "Create Product"),
       el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
     ], { wide: true });
   }
 
-  const panel = crudPanel(document.getElementById("panel"), {
-    title: "Products / Styles",
-    endpoint: "/master/products/",
-    columns: [
-      { render: p => (p.image_display_url
-          ? el("img", { src: p.image_display_url, style: "width:44px;height:44px;object-fit:cover;border-radius:8px;background:#faf7f5;" })
-          : el("span", { class: "muted" }, "—")), label: "Image", sortable: false },
-      { key: "code", label: "Code" },
-      { key: "name", label: "Name" },
-      { key: "product_type", label: "Type", render: p => p.product_type || "—" },
-      { key: "category", label: "Category", render: p => p.category || "—" },
-      { label: "Fabrics", sortable: false, render: p => (p.fabric_type_names && p.fabric_type_names.length ? p.fabric_type_names.join(", ") : "—") },
-      { render: p => badge(p.is_active ? "Active" : "Inactive"), label: "Status" },
-      { label: "Details", sortable: false, render: p => el("div", { class: "form-inline" }, [
-          el("button", { type: "button", onclick: () => openOverview(p) }, "Overview"),
-          el("button", { class: "secondary", type: "button", onclick: () => openFiles(p, panel.refresh) }, "Files"),
-          el("button", { class: "secondary", type: "button", onclick: () => openMeasurements(p, panel.refresh) }, "Measurements"),
-        ]) },
-    ],
-    fields: [
-      { name: "name", label: "Product Name", required: true },
-      { name: "product_type", label: "Product Type", type: "select", choices: ["Apparel", "Knitwear", "Bottomwear", "Outerwear", "Accessory", "Other"] },
-      { name: "category", label: "Category (e.g. T-Shirts)", type: "text" },
-      { name: "fabric_types", label: "Fabric Type Options", type: "multiselect", optionsEndpoint: "/master/fabric-types/", optionsLabel: "name" },
-      { name: "description", label: "Description", type: "textarea" },
-    ],
-    editable: true,
-  });
+  // ---------- view product (name, image, code, measurements) ----------
+  function openView(p) {
+    const img = p.image_display_url
+      ? el("img", { src: p.image_display_url, style: "width:150px;height:150px;object-fit:cover;border-radius:10px;border:1px solid var(--border,#eee);" })
+      : el("span", { class: "muted" }, "No image uploaded");
+    let chartNode = el("span", { class: "muted" }, "No measurements recorded.");
+    if ((p.measurement_chart || []).length) {
+      const sizes = []; p.measurement_chart.forEach(m => Object.keys(m.sizes || {}).forEach(s => { if (!sizes.includes(s)) sizes.push(s); }));
+      const t = el("table", { class: "data-table" });
+      t.appendChild(el("thead", {}, el("tr", {}, ["Measurement", ...sizes].map(h => el("th", {}, h)))));
+      t.appendChild(el("tbody", {}, p.measurement_chart.map(m => el("tr", {}, [el("td", {}, m.param || "—"), ...sizes.map(s => el("td", {}, String((m.sizes || {})[s] ?? "—")))]))));
+      chartNode = t;
+    }
+    const row = (label, node) => el("tr", {}, [
+      el("th", { style: "text-align:left;padding:0.5rem 0.9rem;white-space:nowrap;vertical-align:top;color:var(--muted,#666);" }, label),
+      el("td", { style: "padding:0.5rem 0.9rem;vertical-align:top;" }, node)]);
+    showCrudModal(`Product — ${p.code}`, [
+      el("table", { style: "width:100%;border-collapse:collapse;" }, el("tbody", {}, [
+        row("Name", p.name || "—"),
+        row("Code", `${p.code} (auto-generated)`),
+        row("Image", img),
+        row("Measurements", chartNode),
+        row("Status", badge(p.is_active ? "Active" : "Inactive")),
+      ])),
+    ], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+  }
+
+  // ---------- list ----------
+  async function loadProducts() {
+    const wrap = document.getElementById("list-wrap"); wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "crud-header" }, [
+        el("h3", {}, "Products / Styles"),
+        el("button", { class: "btn-add", type: "button", onclick: () => openProductModal(null) }, [el("span", { class: "btn-add-plus" }, "+"), " Add Product"]),
+      ]),
+      body,
+    ]));
+    let items;
+    try { items = await fetchAll("/master/products/"); }
+    catch (e) { body.innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    dataTable(body, {
+      columns: [
+        { label: "Image", sortable: false, render: p => (p.image_display_url
+            ? el("img", { src: p.image_display_url, style: "width:44px;height:44px;object-fit:cover;border-radius:8px;" })
+            : el("span", { class: "muted" }, "—")) },
+        { label: "Code", key: "code" }, { label: "Name", key: "name" },
+        { label: "Measurements", value: p => (p.measurement_chart || []).length, render: p => `${(p.measurement_chart || []).length} row(s)` },
+        { label: "Status", value: p => p.is_active ? "A" : "I", render: p => badge(p.is_active ? "Active" : "Inactive") },
+        { label: "Actions", sortable: false, render: p => el("div", { class: "form-inline" }, [
+            el("button", { type: "button", onclick: () => openView(p) }, "View"),
+            el("button", { class: "secondary", type: "button", onclick: () => openProductModal(p) }, "Edit"),
+          ]) },
+      ], rows: items, pageSize: 12, searchPlaceholder: "Search products — name, code…", emptyText: "No products yet — click Add Product.",
+    });
+  }
+
+  loadProducts();
 </script>
 {% endblock %}

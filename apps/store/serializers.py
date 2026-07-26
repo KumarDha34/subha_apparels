@@ -6,18 +6,49 @@ class OrderAdditionalChargeSerializer(serializers.ModelSerializer):
     order_number = serializers.CharField(source="order.order_number", read_only=True)
     party_name = serializers.CharField(source="order.party.name", read_only=True, default=None)
     charge_type_display = serializers.CharField(source="get_charge_type_display", read_only=True)
+    # Tells the UI what happened to this charge's billing.
+    billing_result = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderAdditionalCharge
         fields = [
             "id", "order", "order_number", "party_name", "charge_type", "charge_type_display",
-            "amount", "remarks", "created_by", "created_at",
+            "amount", "remarks", "created_by", "created_at", "billing_result",
         ]
         read_only_fields = ["created_by"]
 
+    def get_billing_result(self, obj):
+        return getattr(obj, "_billing_result", "")
+
     def create(self, validated_data):
+        from django.utils import timezone
+        from apps.finance.models import CustomerInvoice
         validated_data["created_by"] = self.context["request"].user
-        return super().create(validated_data)
+        charge = super().create(validated_data)
+
+        # Fold this extra charge into billing so the order's true value is invoiced:
+        #  - an OPEN (unpaid/partial) invoice exists  -> add the charge to its total
+        #  - all invoices already PAID               -> raise a SEPARATE supplementary invoice
+        #  - no invoice yet                          -> nothing (it's billed when the order is invoiced)
+        invoices = CustomerInvoice.objects.filter(order=charge.order)
+        open_inv = invoices.exclude(payment_status=CustomerInvoice.PaymentStatus.PAID).order_by("-id").first()
+        if open_inv:
+            open_inv.amount = (open_inv.amount or 0) + charge.amount
+            open_inv.remarks = (open_inv.remarks + "\n" if open_inv.remarks else "") + \
+                f"+ {charge.get_charge_type_display()} charge {charge.amount}"
+            open_inv.save()
+            charge._billing_result = f"Added to open invoice {open_inv.invoice_number}"
+        elif invoices.exists():
+            supp = CustomerInvoice.objects.create(
+                order=charge.order, invoice_date=timezone.localdate(), amount=charge.amount,
+                remarks=f"Supplementary invoice — additional charge: {charge.get_charge_type_display()}"
+                        + (f" ({charge.remarks})" if charge.remarks else ""),
+                created_by=self.context["request"].user,
+            )
+            charge._billing_result = f"Supplementary invoice {supp.invoice_number} raised"
+        else:
+            charge._billing_result = "Recorded in order cost (bill when the order is invoiced)"
+        return charge
 
 
 class FinishedGoodsReceiptSerializer(serializers.ModelSerializer):

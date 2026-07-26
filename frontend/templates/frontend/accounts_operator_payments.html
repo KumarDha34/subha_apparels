@@ -2,13 +2,10 @@
 {% block title %}Operator Payments - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Operator Payments</h2>
-  <p class="page-subtitle">Pay operators their stitching wages — earned = the order's price/piece × pieces returned. Generate a wage statement for a period, then record the payment.</p>
-  <div class="grid grid-4" id="stats" style="margin-bottom:1rem;"></div>
-  <div class="card">
-    <h3>➕ Generate Wage Statement</h3>
-    <div id="gen-form"></div>
-  </div>
-  <div id="list-wrap"></div>
+  <p class="page-subtitle">Pick an operator to see every piece of work — completed, paid, pending (and for which orders/products) and still being worked. Pay for specific pieces, one bundle at a time or all pending at once.</p>
+
+  <div class="card" id="picker"></div>
+  <div id="summary-wrap"></div>
 {% endblock %}
 
 {% block scripts %}
@@ -17,72 +14,164 @@
   renderShell("accounts-operator-payments", "Operator Payments");
 
   let OPERATORS = [];
+  let current = "";
 
-  function renderGen() {
-    const wrap = document.getElementById("gen-form"); wrap.innerHTML = "";
-    const st = { operator: "", start: "", end: "" };
-    const err = el("div", { class: "error-msg", style: "display:none;" });
-    const form = el("div", { class: "form-inline" }, [
-      field("Operator", selectEl({ onchange: e => st.operator = e.target.value }, OPERATORS.map(o => ({ value: o.id, label: o.name })), "", "Select operator")),
-      field("Period Start", el("input", { type: "date", class: "allow-past", oninput: e => st.start = e.target.value })),
-      field("Period End", el("input", { type: "date", class: "allow-past", oninput: e => st.end = e.target.value })),
-      el("button", { type: "button", onclick: async () => {
-        err.style.display = "none";
-        if (!st.operator || !st.start || !st.end) { err.textContent = "Select an operator and a period."; err.style.display = "block"; return; }
-        try { await apiPost("/operators/income/calculate/", { operator: Number(st.operator), period_start: st.start, period_end: st.end }); notify.success("Wage statement generated."); await load(); }
-        catch (e) { err.textContent = e.message; err.style.display = "block"; }
-      } }, "Generate"),
-    ]);
-    wrap.append(err, form);
+  // ---------- visual helpers ----------
+  function avatar(name) {
+    const initial = (String(name || "?").trim().charAt(0) || "?").toUpperCase();
+    return el("div", { style: "width:54px;height:54px;border-radius:50%;background:var(--brand-soft,#fbe9e2);color:var(--brand,#e66239);display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:800;flex-shrink:0;" }, initial);
   }
+  function kpi(icon, label, value, tone, money) {
+    const c = tone === "good" ? "#1a7f4b" : tone === "warn" ? "#b4690e" : tone === "info" ? "#0369a1" : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "flex:1;min-width:150px;display:flex;align-items:center;gap:0.75rem;text-align:left;padding:1rem 1.1rem;" }, [
+      el("div", { style: "font-size:1.6rem;line-height:1;" }, icon),
+      el("div", {}, [
+        el("div", { class: "value", style: `font-size:1.4rem;color:${c};line-height:1.1;` }, money ? fmtMoney(value) : String(value)),
+        el("div", { class: "label" }, label),
+      ]),
+    ]);
+  }
+  function payProgress(paid, pending) {
+    const total = paid + pending, pct = total ? Math.round(paid / total * 100) : 0;
+    return el("div", {}, [
+      el("div", { style: "display:flex;justify-content:space-between;font-size:0.84rem;margin-bottom:0.4rem;" }, [
+        el("span", { class: "muted" }, "Payment progress (pieces)"), el("strong", {}, `${pct}% paid`)]),
+      el("div", { style: "display:flex;height:16px;border-radius:9px;overflow:hidden;background:#f0eeeb;" }, [
+        el("div", { style: `width:${pct}%;background:#1a7f4b;transition:width .5s ease;`, title: `Paid ${paid} pcs` }),
+        el("div", { style: `width:${100 - pct}%;background:#f0b100;transition:width .5s ease;`, title: `Pending ${pending} pcs` })]),
+      el("div", { style: "display:flex;justify-content:space-between;font-size:0.8rem;margin-top:0.35rem;" }, [
+        el("span", { style: "color:#1a7f4b;font-weight:600;" }, `● Paid ${paid} pcs`),
+        el("span", { style: "color:#b4690e;font-weight:600;" }, `● Pending ${pending} pcs`)]),
+    ]);
+  }
+  const productLabel = r => (r.product_code ? `${r.product_code} — ${r.product_name}` : (r.product_name || "—"));
+  const sizeLabel = r => `${r.size_name || "—"}${r.color_name ? " · " + r.color_name : ""}`;
 
-  function openPay(inc) {
-    const remaining = Number(inc.total_income) - Number(inc.paid_amount);
-    const amt = numberInput(String(remaining), () => {}, { min: "0", step: "0.01" });
+  // ---------- pay actions ----------
+  async function payBundle(row) {
+    const pend = row.pending_quantity;
+    const qtyInput = numberInput(String(pend), () => {}, { min: "1", max: String(pend), step: "1" });
     const err = el("div", { class: "error-msg", style: "display:none;" });
-    showCrudModal(`Pay ${inc.operator_name}`, [
-      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Earned ${fmtMoney(inc.total_income)}, paid ${fmtMoney(inc.paid_amount)}, remaining ${fmtMoney(remaining)}.`),
-      err, field("Amount to pay", amt),
+    showCrudModal(`Pay — ${row.bundle_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        `${row.order_number || "—"} · ${productLabel(row)} · Size ${sizeLabel(row)}`),
+      el("div", { class: "mode-banner mode-fixed" }, `${pend} pc(s) pending @ ${fmtMoney(row.rate_per_piece)}/pc = ${fmtMoney(row.pending_amount)}`),
+      err, field("Pieces to pay", qtyInput),
     ], [
       el("button", { type: "button", onclick: async () => {
-        try { await apiPost(`/operators/income/${inc.id}/mark_paid/`, { amount: Number(amt.value || 0) }); closeCrudModal(); notify.success("Payment recorded."); await load(); }
-        catch (e) { err.textContent = e.message; err.style.display = "block"; }
+        err.style.display = "none";
+        const q = Number(qtyInput.value);
+        if (!(q >= 1) || q > pend) { err.textContent = `Enter between 1 and ${pend}.`; err.style.display = "block"; return; }
+        try {
+          const res = await apiPost(`/operators/assignments/${row.id}/pay_pieces/`, { quantity: q });
+          closeCrudModal(); notify.success(`Paid ${res.paid} pc(s) — ${fmtMoney(res.amount)}.`); await loadSummary(current);
+        } catch (e) { err.textContent = e.message; err.style.display = "block"; }
       } }, "Pay"),
       el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
     ]);
   }
+  async function payAllPending(rows) {
+    const payable = rows.filter(r => r.pending_quantity > 0);
+    if (!payable.length) { notify.warning("Nothing pending to pay."); return; }
+    const total = payable.reduce((s, r) => s + r.pending_amount, 0);
+    const ok = await showConfirm(`Pay all pending: ${payable.length} bundle(s), ${fmtMoney(total)}?`, { title: "Pay all pending", confirmText: "Pay All" });
+    if (!ok) return;
+    let n = 0;
+    for (const r of payable) { try { await apiPost(`/operators/assignments/${r.id}/pay_pieces/`, {}); n++; } catch (e) { notify.error(`${r.bundle_number}: ${e.message}`); } }
+    notify.success(`Paid ${n} bundle(s).`); await loadSummary(current);
+  }
 
-  async function load() {
-    let incomes;
-    try { incomes = await fetchAll("/operators/income/"); }
-    catch (e) { document.getElementById("list-wrap").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
-    const earned = incomes.reduce((s, i) => s + Number(i.total_income || 0), 0);
-    const paid = incomes.reduce((s, i) => s + Number(i.paid_amount || 0), 0);
-    const stats = document.getElementById("stats"); stats.innerHTML = "";
-    [["Total Earned", earned], ["Total Paid", paid], ["Pending", earned - paid], ["Statements", incomes.length]].forEach(([l, v], idx) =>
-      stats.appendChild(el("div", { class: "card stat" }, [el("div", { class: "value" }, idx === 3 ? String(v) : fmtMoney(v)), el("div", { class: "label" }, l)])));
-    const wrap = document.getElementById("list-wrap"); wrap.innerHTML = "";
-    const body = el("div", {}); wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Wage Statements"), body]));
-    dataTable(body, {
+  async function loadSummary(opId) {
+    const wrap = document.getElementById("summary-wrap"); wrap.innerHTML = "";
+    if (!opId) {
+      wrap.appendChild(el("div", { class: "card", style: "text-align:center;padding:2.5rem 1rem;color:var(--text-muted);" }, [
+        el("div", { style: "font-size:2.4rem;" }, "🧑‍🏭"),
+        el("p", { style: "margin:0.5rem 0 0;" }, "Select an operator above to see their work and pay for pieces."),
+      ]));
+      return;
+    }
+    let d;
+    try { d = await apiGet(`/operators/assignments/work_summary/?operator=${opId}`); }
+    catch (e) { wrap.innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    const t = d.totals;
+    const op = OPERATORS.find(o => String(o.id) === String(opId)) || {};
+
+    // ---- operator header ----
+    wrap.appendChild(el("div", { class: "card", style: "display:flex;align-items:center;gap:1rem;flex-wrap:wrap;" }, [
+      avatar(op.name),
+      el("div", { style: "flex:1;min-width:180px;" }, [
+        el("div", { style: "font-size:1.2rem;font-weight:800;" }, op.name || "Operator"),
+        el("div", { class: "muted" }, `${(op.operator_type || "").toLowerCase() || "operator"} · ${d.completed.length + d.in_progress.length} bundle(s)`),
+      ]),
+      el("div", { style: "text-align:right;" }, [
+        el("div", { class: "muted", style: "font-size:0.8rem;" }, "Amount pending"),
+        el("div", { style: `font-size:1.7rem;font-weight:800;color:${t.amount_pending > 0 ? "#b4690e" : "#1a7f4b"};line-height:1.1;` }, fmtMoney(t.amount_pending)),
+      ]),
+      t.pieces_pending > 0
+        ? el("button", { type: "button", onclick: () => payAllPending(d.completed) }, "💵 Pay All Pending")
+        : el("span", { class: "badge success" }, "All paid"),
+    ]));
+
+    // ---- KPI row + progress ----
+    wrap.appendChild(el("div", { style: "display:flex;gap:0.7rem;flex-wrap:wrap;margin:0.9rem 0;" }, [
+      kpi("🧵", "Completed pcs", t.pieces_completed),
+      kpi("✅", "Paid pcs", t.pieces_paid, "good"),
+      kpi("⏳", "Pending pcs", t.pieces_pending, "warn"),
+      kpi("🛠️", "Still working", t.pieces_in_progress, "info"),
+    ]));
+    wrap.appendChild(el("div", { style: "display:flex;gap:0.7rem;flex-wrap:wrap;margin-bottom:0.9rem;" }, [
+      kpi("💰", "Total earned", t.amount_earned, null, true),
+      kpi("💵", "Total paid", t.amount_paid, "good", true),
+      kpi("🧾", "Amount pending", t.amount_pending, "warn", true),
+    ]));
+    wrap.appendChild(el("div", { class: "card" }, [payProgress(t.pieces_paid, t.pieces_pending)]));
+
+    // ---- completed work (payable) ----
+    const cbody = el("div", {});
+    const payAllBtn = t.pieces_pending > 0 ? el("button", { class: "secondary", type: "button", onclick: () => payAllPending(d.completed) }, "💵 Pay All Pending") : null;
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "crud-header" }, [el("h3", {}, `✅ Completed Work — pieces & payment (${d.completed.length} bundles)`), payAllBtn].filter(Boolean)),
+      cbody,
+    ]));
+    if (!d.completed.length) cbody.appendChild(el("p", { class: "muted" }, "No completed bundles yet."));
+    else dataTable(cbody, {
       columns: [
-        { key: "operator_name", label: "Operator" },
-        { label: "Period", value: i => i.period_end, render: i => `${i.period_start} — ${i.period_end}` },
-        { label: "Pieces", value: i => Number(i.pieces_completed) },
-        { label: "Earned", value: i => Number(i.total_income), render: i => fmtMoney(i.total_income) },
-        { label: "Paid", value: i => Number(i.paid_amount), render: i => fmtMoney(i.paid_amount) },
-        { label: "Pending", value: i => Number(i.total_income) - Number(i.paid_amount), render: i => fmtMoney(Number(i.total_income) - Number(i.paid_amount)) },
-        { label: "Status", value: i => i.payment_status, render: i => badge(i.payment_status) },
-        { label: "Action", sortable: false, render: i => (Number(i.total_income) - Number(i.paid_amount) > 0
-            ? el("button", { class: "secondary", type: "button", onclick: () => openPay(i) }, "Pay") : "—") },
-      ], rows: incomes, pageSize: 12, initialSort: { key: "period_end", dir: "desc" },
-      searchPlaceholder: "Search — operator…", emptyText: "No wage statements yet — generate one above.",
+        { label: "Order", value: r => r.order_number || "", render: r => r.order_number || "—" },
+        { label: "Product", sortable: false, render: r => productLabel(r) },
+        { label: "Bundle", key: "bundle_number" },
+        { label: "Size", value: r => r.size_name || "", render: r => sizeLabel(r) },
+        { label: "Completed", num: true, value: r => Number(r.returned_quantity || 0), render: r => String(r.returned_quantity || 0) },
+        { label: "Paid", num: true, value: r => Number(r.paid_quantity || 0), render: r => el("span", { style: "color:#1a7f4b;font-weight:600;" }, String(r.paid_quantity || 0)) },
+        { label: "Pending", num: true, value: r => Number(r.pending_quantity), render: r => (r.pending_quantity ? el("span", { class: "badge warning" }, String(r.pending_quantity)) : el("span", { class: "muted" }, "0")) },
+        { label: "Rate", num: true, value: r => Number(r.rate_per_piece), render: r => fmtMoney(r.rate_per_piece) },
+        { label: "Pending ₹", num: true, value: r => Number(r.pending_amount), render: r => el("strong", { style: `color:${r.pending_amount > 0 ? "#b4690e" : "var(--text-muted)"};` }, fmtMoney(r.pending_amount)) },
+        { label: "Action", sortable: false, render: r => (r.pending_quantity > 0
+            ? el("button", { type: "button", onclick: () => payBundle(r) }, "Pay") : el("span", { class: "badge success" }, "Paid")) },
+      ], rows: d.completed, pageSize: 12, searchPlaceholder: "Search — order, product, bundle…", emptyText: "No completed work.",
+    });
+
+    // ---- still working ----
+    const ibody = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, `🛠️ Still Being Worked (${d.in_progress.length} bundles)`), ibody]));
+    if (!d.in_progress.length) ibody.appendChild(el("p", { class: "muted" }, "Nothing in progress."));
+    else dataTable(ibody, {
+      columns: [
+        { label: "Order", value: r => r.order_number || "", render: r => r.order_number || "—" },
+        { label: "Product", sortable: false, render: r => productLabel(r) },
+        { label: "Bundle", key: "bundle_number" },
+        { label: "Size", value: r => r.size_name || "", render: r => sizeLabel(r) },
+        { label: "Issued (working)", num: true, value: r => Number(r.issued_quantity || 0), render: r => String(r.issued_quantity || 0) },
+        { label: "Status", value: r => r.status, render: r => badge(r.status) },
+      ], rows: d.in_progress, pageSize: 10, searchPlaceholder: "Search — order, product…", emptyText: "Nothing in progress.",
     });
   }
 
   (async function init() {
     OPERATORS = await fetchAll("/operators/operators/?is_active=true");
-    renderGen();
-    await load();
+    document.getElementById("picker").append(
+      field("🧑‍🏭 Operator", selectEl({ onchange: e => { current = e.target.value; loadSummary(current); } },
+        OPERATORS.map(o => ({ value: o.id, label: o.name })), "", "Select operator")));
+    loadSummary("");
   })();
 </script>
 {% endblock %}

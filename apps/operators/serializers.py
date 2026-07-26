@@ -2,12 +2,48 @@ from decimal import Decimal
 from rest_framework import serializers
 from apps.cutting.models import Bundle
 from .models import Operator, BundleAssignment, OperatorIncome
+from django.db.models import Sum
+
+class GroupMemberSerializer(serializers.ModelSerializer):
+    """Serializer for group members"""
+    pieces = serializers.SerializerMethodField()
+    defects = serializers.SerializerMethodField()
+    efficiency = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Operator
+        fields = ["id", "name", "contact", "is_active", "joined_date", "pieces", "defects", "efficiency"]
+    
+    def get_pieces(self, obj):
+        from apps.operators.models import BundleAssignment
+        return BundleAssignment.objects.filter(
+            operator=obj,
+            status__in=[BundleAssignment.Status.COMPLETED, BundleAssignment.Status.QUALITY_CHECKED]
+        ).aggregate(total=Sum('returned_quantity'))['total'] or 0
+    
+    def get_defects(self, obj):
+        from apps.operators.models import BundleAssignment
+        return BundleAssignment.objects.filter(operator=obj).aggregate(total=Sum('defects'))['total'] or 0
+    
+    def get_efficiency(self, obj):
+        pieces = self.get_pieces(obj)
+        defects = self.get_defects(obj)
+        if pieces:
+            return round((pieces - defects) / pieces * 100, 2)
+        return 0
 
 
 class OperatorSerializer(serializers.ModelSerializer):
+    members = GroupMemberSerializer(source="member_list", many=True, read_only=True)
+    member_count = serializers.IntegerField(read_only=True)
+    is_group = serializers.SerializerMethodField()
+    
     class Meta:
         model = Operator
         fields = "__all__"
+    
+    def get_is_group(self, obj):
+        return obj.operator_type == "GROUP"
 
 
 class BundleAssignmentSerializer(serializers.ModelSerializer):
@@ -21,12 +57,33 @@ class BundleAssignmentSerializer(serializers.ModelSerializer):
     shortage_quantity = serializers.IntegerField(read_only=True)
     # Set by Production at allocation -- required when creating an assignment.
     rate_per_piece = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"))
+    # Pay tracking (per piece): earned = returned x rate; pending = unpaid pieces.
+    pending_quantity = serializers.SerializerMethodField()
+    earned_amount = serializers.SerializerMethodField()
+    paid_amount = serializers.SerializerMethodField()
+    pending_amount = serializers.SerializerMethodField()
+
+    def _r(self, obj):
+        return obj.returned_quantity or 0
+
+    def get_pending_quantity(self, obj):
+        return max(self._r(obj) - (obj.paid_quantity or 0), 0)
+
+    def get_earned_amount(self, obj):
+        return float(Decimal(self._r(obj)) * Decimal(obj.rate_per_piece or 0))
+
+    def get_paid_amount(self, obj):
+        return float(Decimal(obj.paid_quantity or 0) * Decimal(obj.rate_per_piece or 0))
+
+    def get_pending_amount(self, obj):
+        return float(Decimal(self.get_pending_quantity(obj)) * Decimal(obj.rate_per_piece or 0))
 
     class Meta:
         model = BundleAssignment
         fields = [
             "id", "bundle", "bundle_number", "size_name", "color_name", "product_code", "product_name", "order_number",
             "operator", "operator_name", "rate_per_piece",
+            "paid_quantity", "pending_quantity", "earned_amount", "paid_amount", "pending_amount",
             "assigned_date", "completion_date", "status",
             "issued_quantity", "returned_quantity", "shortage_quantity",
             "shortage_reason", "shortage_reason_status", "shortage_reviewed_by",
@@ -34,7 +91,7 @@ class BundleAssignmentSerializer(serializers.ModelSerializer):
             "quality_check_passed", "defects", "defect_reason", "remarks", "assigned_by", "created_at", "updated_at",
         ]
         read_only_fields = [
-            "assigned_date", "assigned_by", "returned_quantity", "shortage_reason",
+            "assigned_date", "assigned_by", "returned_quantity", "paid_quantity", "shortage_reason",
             "shortage_reason_status", "shortage_reviewed_by", "shortage_reviewed_at", "shortage_review_notes",
             "defects", "defect_reason",
         ]

@@ -35,7 +35,7 @@
   async function loadReceivedOrders() {
     const recvd = await fetchAll("/production/process-dispatches/?department=FINISHING&status=RECEIVED").catch(() => []);
     const seen = new Map();
-    recvd.forEach(r => { if (r.order != null && !seen.has(String(r.order))) seen.set(String(r.order), { id: r.order, order_number: r.order_number, party_name: r.party_name }); });
+    recvd.forEach(r => { if (r.order != null && !seen.has(String(r.order))) seen.set(String(r.order), { id: r.order, order_number: r.order_number, order_label: r.order_label || r.order_number }); });
     RECEIVED_ORDERS = [...seen.values()];
   }
 
@@ -54,7 +54,7 @@
     const wrap = document.getElementById("qc-form"); wrap.innerHTML = "";
     const err = el("div", { class: "error-msg", style: "display:none;" });
     const orderSel = field("Order (received)", selectEl({ onchange: e => onOrder(e.target.value) },
-      RECEIVED_ORDERS.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name || ""}` })), state.order, "Select a received order"));
+      RECEIVED_ORDERS.map(o => ({ value: o.id, label: o.order_label })), state.order, "Select a received order"));
 
     const nodes = [el("h3", {}, "✅ Record Quality Check"), err, orderSel];
 

@@ -16,6 +16,13 @@ class FinishingQualityCheckViewSet(viewsets.ModelViewSet):
     required_roles = ["ADMIN", "FINISHING_SUPERVISOR"]
     filterset_fields = ["order"]
 
+    def get_permissions(self):
+        # Altered pieces are reworked on the Production floor, so a Production
+        # Supervisor is also allowed to record the rework outcome.
+        if getattr(self, "action", None) == "record_rework":
+            self.required_roles = ["ADMIN", "FINISHING_SUPERVISOR", "PRODUCTION_SUPERVISOR"]
+        return super().get_permissions()
+
     @action(detail=False, methods=["get"])
     def breakdown(self, request):
         """Size/colour breakdown for the QC grid, reconciled to what Finishing

@@ -47,7 +47,7 @@
         field("Operator", selectEl({ onchange: e => state.operator = e.target.value }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), state.operator, "Select operator")),
         field("Accessory", selectEl({ onchange: e => state.accessory_stock = e.target.value }, MASTER.accessories.map(s => ({ value: s.id, label: accLabel(s) })), state.accessory_stock, "Select accessory")),
         field("Quantity", numberInput(state.issued_quantity, v => state.issued_quantity = v, { min: "0", step: "0.01" })),
-        field("For Order (optional)", selectEl({ onchange: e => state.order = e.target.value }, MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "— any —")),
+        field("For Order (optional)", selectEl({ onchange: e => state.order = e.target.value }, MASTER.orders.map(o => ({ value: o.id, label: o.order_label })), state.order, "— any —")),
         field("Issue Date", el("input", { type: "date", value: state.issued_date, oninput: e => state.issued_date = e.target.value })),
       ]);
       const remarks = field("Remarks", el("textarea", { oninput: e => state.remarks = e.target.value }, state.remarks || ""));

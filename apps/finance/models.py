@@ -143,6 +143,14 @@ class CustomerInvoice(TimeStampedModel):
     order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="customer_invoices")
     invoice_date = models.DateField()
     amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0"))])
+    # Extra costs incurred while producing/completing the order and billed on
+    # to the customer AFTER the invoice was raised (e.g. extra transport, rush
+    # handling, rework). {label: amount}; each entry is also folded into
+    # `amount`, so `amount` is always the current total the customer owes.
+    additional_costs = models.JSONField(
+        default=dict, blank=True,
+        help_text="Post-invoice extra charges billed to the customer, {label: amount}. Folded into `amount`.",
+    )
     paid_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     payment_status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.UNPAID)
     due_date = models.DateField(null=True, blank=True)
@@ -155,6 +163,15 @@ class CustomerInvoice(TimeStampedModel):
     @property
     def due_amount(self):
         return self.amount - self.paid_amount
+
+    @property
+    def additional_total(self):
+        return sum((Decimal(str(v)) for v in (self.additional_costs or {}).values()), Decimal("0"))
+
+    @property
+    def base_amount(self):
+        """The original invoice value before any post-invoice extra charges."""
+        return (self.amount or Decimal("0")) - self.additional_total
 
     def save(self, *args, **kwargs):
         if not self.invoice_number:

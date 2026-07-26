@@ -143,3 +143,30 @@ def record_payment(invoice, amount, payment_method, payment_date, notes, user):
         invoice.payment_status = Invoice.PaymentStatus.PARTIALLY_PAID
     invoice.save(update_fields=["payment_status", "updated_at"])
     return record
+
+
+def sync_invoice_status(invoice):
+    """Re-derive a supplier invoice's payment status against its CURRENT total.
+    Call after the total changes (e.g. an extra cost is added AFTER payment):
+    a fully-paid bill that grows becomes PARTIALLY_PAID with a fresh balance
+    due, while the paid amount stays untouched. Keeps the latest PaymentRecord's
+    running balance in step so 'due' is always total - paid."""
+    from decimal import Decimal
+    last = invoice.payment_records.order_by("-id").first()
+    paid = last.paid_amount if last else Decimal("0")
+    # keep the running-balance row aligned to the new total (its save() recomputes due_amount)
+    if last and last.total_amount != invoice.total_amount:
+        last.total_amount = invoice.total_amount
+        last.payment_status = (PaymentRecord.PaymentStatus.PAID if paid >= invoice.total_amount
+                               else PaymentRecord.PaymentStatus.PARTIALLY_PAID)
+        last.save(update_fields=["total_amount", "due_amount", "payment_status", "updated_at"])
+    if paid <= 0:
+        status = Invoice.PaymentStatus.UNPAID
+    elif paid >= invoice.total_amount:
+        status = Invoice.PaymentStatus.PAID
+    else:
+        status = Invoice.PaymentStatus.PARTIALLY_PAID
+    if invoice.payment_status != status:
+        invoice.payment_status = status
+        invoice.save(update_fields=["payment_status", "updated_at"])
+    return status

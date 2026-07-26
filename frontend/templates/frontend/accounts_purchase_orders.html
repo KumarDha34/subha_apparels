@@ -2,8 +2,9 @@
 {% block title %}Purchase Orders - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Purchase Orders</h2>
-  <p class="page-subtitle">Created by Store from the Purchase Orders workflow — read-only here.</p>
+  <p class="page-subtitle">Created by Store from the Purchase Orders workflow — read-only here. Filter by a specific order to see only its purchases.</p>
 
+  <div id="filter-card"></div>
   <div id="po-table-wrap"></div>
 {% endblock %}
 
@@ -12,26 +13,55 @@
   Auth.guardPage(["ACCOUNTS"]);
   renderShell("accounts-purchase-orders", "Purchase Orders");
 
-  async function refresh() {
-    const wrap = document.getElementById("po-table-wrap");
-    wrap.innerHTML = "Loading...";
-    try {
-      const items = await fetchAll("/accounts/purchase-orders/");
-      wrap.innerHTML = "";
-      const body = el("div", {});
-      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Purchase Orders"), body]));
-      dataTable(body, {
-        columns: [
-          { label: "PO #", key: "po_number" },
-          { label: "Vendor / Party", value: po => po.vendor_name || po.party_name || "", render: po => po.vendor_name || po.party_name || "—" },
-          { label: "Type", value: po => po.po_type.replace(/_/g, " "), render: po => po.po_type.replace(/_/g, " ") },
-          { label: "Status", key: "receipt_status", render: po => badge(po.receipt_status) },
-          { label: "Date", key: "po_date" },
-          { label: "Actions", sortable: false, render: po => el("button", { class: "secondary", type: "button", onclick: () => viewPO(po) }, "View") },
-        ], rows: items, pageSize: 12, initialSort: { key: "po_date", dir: "desc" },
-        searchPlaceholder: "Search purchase orders…", emptyText: "No purchase orders yet.",
-      });
-    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  let ALL_POS = [];
+  let ORDERS = [];
+  let filterOrder = "";
+
+  function poTotal(po) {
+    return (po.items || []).reduce((s, it) => s + Number((it.received_quantity || 0)) * Number(it.rate || 0), 0);
+  }
+
+  function renderFilter() {
+    const wrap = document.getElementById("filter-card"); wrap.innerHTML = "";
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("div", { class: "form-inline" }, [
+        field("🔎 Filter by order", selectEl({ onchange: e => { filterOrder = e.target.value; render(); } },
+          ORDERS.map(o => ({ value: o.id, label: o.order_label })), filterOrder, "All orders")),
+      ]),
+    ]));
+  }
+
+  function render() {
+    const wrap = document.getElementById("po-table-wrap"); wrap.innerHTML = "";
+    const rows = filterOrder ? ALL_POS.filter(p => String(p.related_order) === String(filterOrder)) : ALL_POS;
+
+    if (filterOrder) {
+      const o = ORDERS.find(x => String(x.id) === String(filterOrder)) || {};
+      const total = rows.reduce((s, p) => s + poTotal(p), 0);
+      wrap.appendChild(el("div", { class: "card" }, [
+        el("h3", {}, `📄 ${o.order_label || "Order"} — Purchases`),
+        el("div", { style: "display:flex;gap:0.6rem;flex-wrap:wrap;" }, [
+          el("div", { class: "card stat", style: "text-align:center;" }, [el("div", { class: "value" }, String(rows.length)), el("div", { class: "label" }, "Purchase orders")]),
+          el("div", { class: "card stat", style: "text-align:center;" }, [el("div", { class: "value" }, fmtMoney(total)), el("div", { class: "label" }, "Total purchased (received × rate)")]),
+        ]),
+      ]));
+    }
+
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Purchase Orders"), body]));
+    dataTable(body, {
+      columns: [
+        { label: "PO #", key: "po_number" },
+        { label: "Vendor / Party", value: po => po.vendor_name || po.party_name || "", render: po => po.vendor_name || po.party_name || "—" },
+        { label: "Order", value: po => po.order_number || "", render: po => po.order_number || "—" },
+        { label: "Type", value: po => po.po_type.replace(/_/g, " "), render: po => po.po_type.replace(/_/g, " ") },
+        { label: "Total", value: po => poTotal(po), render: po => fmtMoney(poTotal(po)) },
+        { label: "Status", key: "receipt_status", render: po => badge(po.receipt_status) },
+        { label: "Date", key: "po_date" },
+        { label: "Actions", sortable: false, render: po => el("button", { class: "secondary", type: "button", onclick: () => viewPO(po) }, "View") },
+      ], rows, pageSize: 12, initialSort: { key: "po_date", dir: "desc" },
+      searchPlaceholder: "Search purchase orders — PO #, vendor, order…", emptyText: "No purchase orders.",
+    });
   }
 
   function viewPO(po) {
@@ -39,6 +69,13 @@
       [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
   }
 
-  refresh();
+  (async function init() {
+    const wrap = document.getElementById("po-table-wrap"); wrap.innerHTML = "Loading...";
+    try {
+      [ALL_POS, ORDERS] = await Promise.all([fetchAll("/accounts/purchase-orders/"), fetchAll("/orders/").catch(() => [])]);
+      renderFilter();
+      render();
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  })();
 </script>
 {% endblock %}

@@ -1,0 +1,169 @@
+{% extends "frontend/base.html" %}
+{% block title %}Product Profitability - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Product Profitability</h2>
+  <p class="page-subtitle">Revenue, cost of goods and profit for every product — click a product for the full drill-down: cost components (per unit &amp; total), and revenue by order, customer, size and colour.</p>
+
+  <div class="grid grid-4" id="summary" style="margin-bottom:1rem;"></div>
+  <div id="list-wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN", "ACCOUNTS"]);
+  renderShell("accounts-product-pnl", "Product Profitability");
+
+  function tile(label, value, tone, money, pct) {
+    const c = tone === "good" ? "#1a7f4b" : tone === "bad" ? "#b3261e" : "var(--text,#333)";
+    const v = pct ? `${value}%` : (money ? fmtMoney(value) : String(value));
+    return el("div", { class: "card stat", style: "text-align:center;" }, [
+      el("div", { class: "value", style: `color:${c};` }, v), el("div", { class: "label" }, label),
+    ]);
+  }
+  const profitTone = v => (v > 0 ? "good" : (v < 0 ? "bad" : null));
+  function statusBadge(s) {
+    const cls = s === "Profitable" ? "success" : (s === "Loss-making" ? "danger" : "");
+    return el("span", { class: `badge ${cls}` }, s);
+  }
+
+  // Lightweight horizontal bar chart (no external lib).
+  function hbarChart(rows, opts) {
+    if (!rows.length) return el("p", { class: "muted" }, "No data.");
+    const max = Math.max(1, ...rows.map(r => Math.abs(opts.value(r))));
+    return el("div", { style: "display:flex;flex-direction:column;gap:0.5rem;padding-top:0.3rem;" }, rows.map(r => {
+      const v = opts.value(r), pct = Math.min(100, Math.abs(v) / max * 100);
+      return el("div", { style: "display:grid;grid-template-columns:120px 1fr 96px;align-items:center;gap:0.6rem;" }, [
+        el("div", { style: "font-size:0.82rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", title: opts.label(r) }, opts.label(r)),
+        el("div", { style: "background:var(--brand-soft,#f0eeeb);border-radius:6px;height:16px;overflow:hidden;" }, [
+          el("div", { style: `height:100%;width:${pct}%;background:${opts.color(r)};border-radius:6px;transition:width .5s ease;` })]),
+        el("div", { style: `text-align:right;font-size:0.82rem;font-weight:700;color:${opts.color(r)};` }, fmtMoney(v)),
+      ]);
+    }));
+  }
+  const chartCard = (title, node) => el("div", { class: "card" }, [el("h3", {}, title), node]);
+
+  // ---- mini section table ----
+  function miniTable(title, cols, rows) {
+    const t = el("table", { class: "data-table" });
+    t.appendChild(el("thead", {}, el("tr", {}, cols.map(c => el("th", { class: c.num ? "num" : "" }, c.label)))));
+    t.appendChild(el("tbody", {}, rows.length
+      ? rows.map(r => el("tr", {}, cols.map(c => el("td", { style: c.num ? "text-align:right;" : "" }, c.render(r)))))
+      : [el("tr", {}, el("td", { colspan: String(cols.length), class: "muted", style: "text-align:center;" }, "No data."))]));
+    return el("div", {}, [el("div", { class: "section-title" }, title), t]);
+  }
+
+  async function openProduct(id) {
+    let d;
+    try { d = await apiGet(`/accounts/product-pnl/${id}/`); }
+    catch (e) { notify.error(e.message); return; }
+    const c = d.costs, pu = c.per_unit;
+    const img = d.image
+      ? el("img", { src: d.image, style: "width:96px;height:96px;object-fit:cover;border-radius:12px;border:1px solid var(--border,#eee);" })
+      : el("div", { style: "width:96px;height:96px;border-radius:12px;background:#faf7f5;display:flex;align-items:center;justify-content:center;font-size:2rem;color:#c9bcb5;" }, "👕");
+
+    const header = el("div", { style: "display:flex;gap:1rem;align-items:center;" }, [
+      img,
+      el("div", {}, [
+        el("div", { style: "font-size:1.15rem;font-weight:800;" }, `${d.name}`),
+        el("div", { class: "muted" }, `${d.code} · ${d.product_type || "—"}${d.category ? " / " + d.category : ""}`),
+        el("div", { style: "margin-top:0.3rem;" }, [statusBadge(d.status), " ", el("span", { class: "muted" }, `${d.units} units`)]),
+      ]),
+    ]);
+
+    const summary = el("div", { style: "display:flex;gap:0.6rem;flex-wrap:wrap;margin-top:0.9rem;" }, [
+      tile("Revenue", d.revenue, null, true), tile("COGS", d.cogs, null, true),
+      tile("Gross Profit", d.profit, profitTone(d.profit), true), tile("Margin", d.margin, profitTone(d.profit), false, true),
+      tile("Avg Price/unit", d.avg_price, null, true), tile("Avg Cost/unit", d.avg_cost, null, true),
+    ]);
+
+    // cost breakdown table (component | total | per unit)
+    const costRows = [
+      ["Fabric", c.fabric, pu.fabric], ["Accessories", c.accessory, pu.accessory],
+      ["Labour", c.labour, pu.labour], ["Processing / Finishing", c.processing, pu.processing],
+      ["Additional Charges", c.charges, pu.charges],
+    ];
+    const costTable = el("table", { class: "data-table" });
+    costTable.appendChild(el("thead", {}, el("tr", {}, [el("th", {}, "Cost Component"), el("th", { style: "text-align:right;" }, "Total"), el("th", { style: "text-align:right;" }, "Per Unit")])));
+    costTable.appendChild(el("tbody", {}, [
+      ...costRows.map(([l, tot, per]) => el("tr", {}, [el("td", {}, l), el("td", { style: "text-align:right;" }, fmtMoney(tot)), el("td", { style: "text-align:right;" }, fmtMoney(per))])),
+      el("tr", { style: "font-weight:700;" }, [el("td", {}, "Total COGS"), el("td", { style: "text-align:right;" }, fmtMoney(c.total)), el("td", { style: "text-align:right;" }, fmtMoney(pu.total))]),
+    ]));
+
+    const byOrder = miniTable("Revenue & Profit by Order", [
+      { label: "Order", render: r => r.order_number }, { label: "Customer", render: r => r.customer },
+      { label: "Qty", num: true, render: r => String(r.qty) }, { label: "Revenue", num: true, render: r => fmtMoney(r.revenue) },
+      { label: "Cost", num: true, render: r => fmtMoney(r.cost) }, { label: "Profit", num: true, render: r => fmtMoney(r.profit) },
+      { label: "Margin", num: true, render: r => `${r.margin}%` },
+    ], d.by_order);
+
+    const byCust = miniTable("Revenue by Customer", [
+      { label: "Customer", render: r => r.customer }, { label: "Orders", num: true, render: r => String(r.orders) },
+      { label: "Qty", num: true, render: r => String(r.qty) }, { label: "Revenue", num: true, render: r => fmtMoney(r.revenue) },
+      { label: "Profit", num: true, render: r => fmtMoney(r.profit) }, { label: "Margin", num: true, render: r => `${r.margin}%` },
+    ], d.by_customer);
+
+    const scCols = key => [
+      { label: key, render: r => r.key }, { label: "Qty", num: true, render: r => String(r.qty) },
+      { label: "Revenue", num: true, render: r => fmtMoney(r.revenue) }, { label: "Cost", num: true, render: r => fmtMoney(r.cost) },
+      { label: "Profit", num: true, render: r => fmtMoney(r.profit) }, { label: "Profit/unit", num: true, render: r => fmtMoney(r.profit_per_unit) },
+    ];
+    const bySize = miniTable("By Size", scCols("Size"), d.by_size);
+    const byColor = miniTable("By Colour", scCols("Colour"), d.by_color);
+
+    const costChart = hbarChart([
+      { k: "Fabric", v: c.fabric }, { k: "Accessories", v: c.accessory }, { k: "Labour", v: c.labour },
+      { k: "Processing", v: c.processing }, { k: "Charges", v: c.charges },
+    ].filter(x => x.v > 0), { label: r => r.k, value: r => r.v, color: () => "var(--brand)" });
+
+    showCrudModal(`Product P&L — ${d.code}`, [
+      header, summary,
+      el("div", { class: "section-title" }, "Cost Composition"), costChart,
+      el("div", { class: "section-title" }, "Cost Breakdown (total & per unit)"), costTable,
+      byOrder, byCust,
+      el("div", { class: "grid grid-2" }, [bySize, byColor]),
+    ], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+  }
+
+  async function load() {
+    let d;
+    try { d = await apiGet("/accounts/product-pnl/"); }
+    catch (e) { document.getElementById("list-wrap").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    const s = d.summary;
+    const sum = document.getElementById("summary"); sum.innerHTML = "";
+    sum.append(
+      tile("Products", s.products), tile("Total Revenue", s.revenue, null, true),
+      tile("Total COGS", s.cogs, null, true), tile("Gross Profit", s.profit, profitTone(s.profit), true));
+    const mrow = el("div", { class: "grid grid-4", style: "margin-bottom:1rem;" }, [tile("Overall Margin", s.margin, profitTone(s.profit), false, true)]);
+
+    const wrap = document.getElementById("list-wrap"); wrap.innerHTML = "";
+
+    // ---- charts: revenue by product, profit by product (top 10) ----
+    const byRev = [...d.products].sort((a, b) => b.revenue - a.revenue).slice(0, 10);
+    const byProf = [...d.products].sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit)).slice(0, 10);
+    const charts = el("div", { class: "grid grid-2", style: "margin-bottom:1rem;" }, [
+      chartCard("Revenue by Product", hbarChart(byRev, { label: r => r.code, value: r => r.revenue, color: () => "var(--brand)" })),
+      chartCard("Profit by Product", hbarChart(byProf, { label: r => r.code, value: r => r.profit, color: r => (r.profit >= 0 ? "#1a7f4b" : "#b3261e") })),
+    ]);
+
+    const body = el("div", {});
+    wrap.append(mrow, charts, el("div", { class: "card" }, [el("h3", {}, "Products"), body]));
+    dataTable(body, {
+      columns: [
+        { label: "", sortable: false, render: p => (p.image
+            ? el("img", { src: p.image, style: "width:38px;height:38px;object-fit:cover;border-radius:7px;" })
+            : el("span", { class: "muted" }, "—")) },
+        { label: "Code", key: "code" }, { label: "Product", key: "name" },
+        { label: "Units", value: p => Number(p.units), render: p => String(p.units) },
+        { label: "Revenue", value: p => Number(p.revenue), render: p => fmtMoney(p.revenue) },
+        { label: "COGS", value: p => Number(p.cogs), render: p => fmtMoney(p.cogs) },
+        { label: "Profit", value: p => Number(p.profit), render: p => el("strong", { style: `color:${p.profit >= 0 ? "#1a7f4b" : "#b3261e"};` }, fmtMoney(p.profit)) },
+        { label: "Margin", value: p => Number(p.margin), render: p => `${p.margin}%` },
+        { label: "Status", value: p => p.status, render: p => statusBadge(p.status) },
+        { label: "Action", sortable: false, render: p => el("button", { type: "button", onclick: () => openProduct(p.id) }, "View P&L") },
+      ], rows: d.products, pageSize: 15, initialSort: { key: "Profit", dir: "desc" },
+      searchPlaceholder: "Search products — code, name…", emptyText: "No product financials yet.",
+    });
+  }
+  load();
+</script>
+{% endblock %}

@@ -46,7 +46,7 @@
 
     const header = el("div", { class: "form-inline" }, [
       field("Related Order", selectEl({ onchange: e => { poState.related_order = e.target.value; } },
-        MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), poState.related_order, "Select order")),
+        MASTER.orders.map(o => ({ value: o.id, label: o.order_label })), poState.related_order, "Select order")),
       field("Vendor", selectWithAdd(
         selectEl({ onchange: e => { poState.vendor = e.target.value; } },
           MASTER.vendors.map(v => ({ value: v.id, label: v.company_name })), poState.vendor, "Select vendor"),

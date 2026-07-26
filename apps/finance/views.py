@@ -33,6 +33,28 @@ class CustomerInvoiceViewSet(viewsets.ModelViewSet):
     filterset_fields = ["order", "payment_status"]
     search_fields = ["invoice_number", "order__order_number"]
 
+    @action(detail=True, methods=["post"], url_path="add-cost")
+    def add_cost(self, request, pk=None):
+        """Body: {label, amount}. Bill the customer an extra cost incurred while
+        producing/completing the order, AFTER the invoice was raised. The charge
+        is added to the invoice total (so the balance due grows) and recorded in
+        `additional_costs` for a line-by-line breakdown. A fully-paid invoice
+        re-opens as PARTIALLY_PAID with the new balance due."""
+        inv = self.get_object()
+        label = (request.data.get("label") or "").strip() or "Additional Cost"
+        try:
+            amount = Decimal(str(request.data.get("amount")))
+        except Exception:
+            return Response({"detail": "A valid amount is required."}, status=400)
+        if amount <= 0:
+            return Response({"detail": "Amount must be greater than zero."}, status=400)
+        costs = inv.additional_costs or {}
+        costs[label] = float(costs.get(label, 0)) + float(amount)
+        inv.additional_costs = costs
+        inv.amount = (inv.amount or Decimal("0")) + amount
+        inv.save()  # re-derives payment_status against the new, higher total
+        return Response(self.get_serializer(inv).data)
+
     @action(detail=True, methods=["post"])
     def record_payment(self, request, pk=None):
         """Body: {amount}. Adds a (partial) payment; status recomputes."""
@@ -234,10 +256,15 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         key = serializer.validated_data["key"]
         amount = serializer.validated_data["amount"]
-        costs = invoice.additional_costs or {}
-        costs[key] = float(costs.get(key, 0)) + float(amount)
-        invoice.additional_costs = costs
-        invoice.save()
+        with db_transaction.atomic():
+            costs = invoice.additional_costs or {}
+            costs[key] = float(costs.get(key, 0)) + float(amount)
+            invoice.additional_costs = costs
+            invoice.save()                          # recomputes total_amount
+            # Total went up -> re-derive status. A previously PAID bill becomes
+            # PARTIALLY_PAID with the new balance due; Record Payment reappears.
+            services.sync_invoice_status(invoice)
+        invoice.refresh_from_db()
         return Response(self.get_serializer(invoice).data)
 
     @action(detail=True, methods=["post"], url_path="pay")
@@ -389,19 +416,30 @@ class OrderPnLView(APIView):
             # Operators are paid the assignment's rate_per_piece x pieces returned.
             labor_cost += assignment_labor_cost(assignment)
 
-        finishing_cost = ProcessDispatch.objects.filter(order=order).aggregate(t=Sum("cost"))["t"] or Decimal("0")
+        # Processing cost, broken out per department (Washing/Printing/Embroidery/Finishing).
+        from collections import defaultdict
+        process_costs = defaultdict(Decimal)
+        for pd in ProcessDispatch.objects.filter(order=order):
+            if pd.cost:
+                process_costs[pd.department] += pd.cost
+        finishing_cost = sum(process_costs.values(), Decimal("0"))
+
         dispatch = Dispatch.objects.filter(order=order).first()
         transport_cost = (dispatch.transport_cost if dispatch and dispatch.transport_cost else Decimal("0"))
 
-        # Extra, non-material charges Store books against the order (transport,
-        # courier, customs, storage, testing, penalties, handling labour...).
+        # Extra, non-material charges (transport, courier, customs, storage,
+        # sample, testing, penalties, handling), broken out per charge type.
         from apps.store.models import OrderAdditionalCharge
-        additional_charges = OrderAdditionalCharge.objects.filter(order=order).aggregate(t=Sum("amount"))["t"] or Decimal("0")
+        charge_costs = defaultdict(Decimal)
+        for ch in OrderAdditionalCharge.objects.filter(order=order):
+            charge_costs[ch.charge_type] += ch.amount
+        additional_charges = sum(charge_costs.values(), Decimal("0"))
 
         total_cost = fabric_cost + accessory_cost + labor_cost + finishing_cost + transport_cost + additional_charges
 
         income_received = IncomeRecord.objects.filter(order=order).aggregate(t=Sum("amount"))["t"] or Decimal("0")
         profit_loss = income_received - total_cost
+        margin_pct = round(float(profit_loss) / float(income_received) * 100, 1) if income_received else None
 
         return Response({
             "order_number": order.order_number,
@@ -414,8 +452,13 @@ class OrderPnLView(APIView):
                 "additional_charges": float(additional_charges),
                 "total_cost": float(total_cost),
             },
+            # Per-department processing costs and per-type additional charges,
+            # so the invoice can show a complete line-by-line cost breakdown.
+            "process_costs": {k: float(v) for k, v in process_costs.items()},
+            "charge_costs": {k: float(v) for k, v in charge_costs.items()},
             "income_received": float(income_received),
             "profit_loss": float(profit_loss),
+            "margin_pct": margin_pct,
             "note": "Fabric/accessory cost only includes Order-Specific and Customer-Supplied purchases tied to this order -- Bulk-purchased general stock is shared inventory and isn't attributed to any single order.",
         })
 
@@ -430,10 +473,27 @@ class PartyStatementView(APIView):
     permission_classes = [HasRole]
     required_roles = ["ADMIN", "ACCOUNTS"]
 
+    def _all_parties(self):
+        from apps.master_data.models import Party
+        from apps.orders.models import Order
+        rows = []
+        for p in Party.objects.all():
+            billed = float(CustomerInvoice.objects.filter(order__party=p).aggregate(s=Sum("amount"))["s"] or 0)
+            if not billed:
+                billed = float(Order.objects.filter(party=p).exclude(status="CANCELLED").aggregate(s=Sum("total_order_amount"))["s"] or 0)
+            received = float(IncomeRecord.objects.filter(order__party=p).aggregate(s=Sum("amount"))["s"] or 0)
+            rows.append({"id": p.id, "name": p.name, "billed": round(billed, 2), "received": round(received, 2),
+                         "outstanding": round(max(billed - received, 0), 2)})
+        rows.sort(key=lambda r: -r["outstanding"])
+        return rows
+
     def get(self, request):
         from apps.master_data.models import Party
+        pid = request.query_params.get("party")
+        if not pid:
+            return Response({"parties": self._all_parties()})
         try:
-            party = Party.objects.get(pk=request.query_params.get("party"))
+            party = Party.objects.get(pk=pid)
         except (Party.DoesNotExist, ValueError, TypeError):
             return Response({"detail": "Party not found."}, status=404)
 
@@ -505,6 +565,100 @@ class PartyStatementView(APIView):
             "summary": {"opening": 0.0, "total_debit": total_debit, "total_credit": total_credit, "closing": closing},
             "ageing": ageing,
             "payments": pay_history,
+            "as_of": str(today),
+        })
+
+
+class SupplierStatementView(APIView):
+    """GET /api/accounts/supplier-statement/                 -> all suppliers summary
+    GET /api/accounts/supplier-statement/?supplier=<id>  -> one supplier's statement
+
+    Mirror of PartyStatementView for the payables side: each purchase bill is a
+    debit (payable up), each payment installment a credit (payable down). Rolls
+    up from Invoice + PaymentRecord -- the same records the Supplier Bills screen
+    uses. PaymentRecord stores the CUMULATIVE paid amount, so each installment is
+    the difference from the previous row for that bill."""
+    permission_classes = [HasRole]
+    required_roles = ["ADMIN", "ACCOUNTS"]
+
+    def _all_suppliers(self):
+        from apps.master_data.models import Vendor
+        rows = []
+        for v in Vendor.objects.all():
+            invs = list(Invoice.objects.filter(vendor=v))
+            billed = float(sum((i.total_amount for i in invs), Decimal("0")))
+            paid = 0.0
+            for inv in invs:
+                last = inv.payment_records.order_by("-id").first()
+                paid += float(last.paid_amount) if last else 0.0
+            if not invs:
+                continue
+            rows.append({"id": v.id, "name": v.company_name, "invoices": len(invs),
+                         "billed": round(billed, 2), "paid": round(paid, 2),
+                         "payable": round(max(billed - paid, 0), 2)})
+        rows.sort(key=lambda r: -r["payable"])
+        return rows
+
+    def get(self, request):
+        from apps.master_data.models import Vendor
+        vid = request.query_params.get("supplier")
+        if not vid:
+            return Response({"suppliers": self._all_suppliers()})
+        try:
+            vendor = Vendor.objects.get(pk=vid)
+        except (Vendor.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "Supplier not found."}, status=404)
+
+        invoices = list(Invoice.objects.filter(vendor=vendor).order_by("invoice_date"))
+        today = timezone.localdate()
+        entries, pay_history = [], []
+        total_billed = total_paid = 0.0
+        ageing = {"0-30": 0.0, "31-60": 0.0, "61-90": 0.0, "90+": 0.0}
+        for inv in invoices:
+            total = float(inv.total_amount)
+            total_billed += total
+            entries.append({"date": str(inv.invoice_date), "voucher": inv.invoice_number or f"BILL-{inv.id}",
+                            "particulars": f"Purchase Bill — {inv.invoice_number or inv.id}",
+                            "debit": round(total, 2), "credit": 0.0, "_o": 0})
+            prev = 0.0
+            for pr in inv.payment_records.order_by("id"):
+                inst = float(pr.paid_amount) - prev
+                prev = float(pr.paid_amount)
+                if inst <= 0:
+                    continue
+                total_paid += inst
+                method = pr.get_payment_method_display() if getattr(pr, "payment_method", None) else "Payment"
+                entries.append({"date": str(pr.payment_date), "voucher": inv.invoice_number or f"BILL-{inv.id}",
+                                "particulars": f"Payment made — {method}", "debit": 0.0, "credit": round(inst, 2), "_o": 1})
+                pay_history.append({"date": str(pr.payment_date), "reference": inv.invoice_number or f"BILL-{inv.id}",
+                                    "method": method, "amount": round(inst, 2)})
+            due = max(total - prev, 0)
+            if due > 0:
+                base = inv.due_date or inv.invoice_date
+                days = (today - base).days
+                bucket = "0-30" if days <= 30 else "31-60" if days <= 60 else "61-90" if days <= 90 else "90+"
+                ageing[bucket] = round(ageing[bucket] + due, 2)
+
+        entries.sort(key=lambda e: (e["date"], e["_o"]))
+        balance = 0.0
+        for e in entries:
+            balance += e["debit"] - e["credit"]
+            e["balance"] = round(balance, 2)
+            e.pop("_o", None)
+        closing = round(total_billed - total_paid, 2)
+
+        return Response({
+            "supplier": {
+                "name": vendor.company_name, "contact_person": vendor.contact_person or "—",
+                "phone": vendor.phone or "—", "email": vendor.email or "—",
+                "address": vendor.address or "—", "gst": vendor.gst_number or "—",
+                "payment_terms": vendor.get_payment_terms_display() if vendor.payment_terms else "—",
+            },
+            "entries": entries,
+            "summary": {"opening": 0.0, "total_debit": round(total_billed, 2),
+                        "total_credit": round(total_paid, 2), "closing": closing},
+            "ageing": ageing,
+            "payments": sorted(pay_history, key=lambda x: x["date"]),
             "as_of": str(today),
         })
 

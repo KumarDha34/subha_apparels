@@ -25,7 +25,7 @@
   function accessoryStockLabel(s) {
     return `${s.accessory_label} — ${s.available_quantity} available` + (s.vendor_name ? ` · Vendor: ${s.vendor_name}` : "");
   }
-  const orderLabel = o => `${o.order_number} — ${o.party_name}`;
+  const orderLabel = o => o.order_label;
 
   async function loadMasterData() {
     const [orders, accessoryStocks] = await Promise.all([

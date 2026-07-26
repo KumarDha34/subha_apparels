@@ -12,15 +12,18 @@ class CustomerInvoiceSerializer(serializers.ModelSerializer):
     order_number = serializers.CharField(source="order.order_number", read_only=True)
     party_name = serializers.CharField(source="order.party.name", read_only=True, default=None)
     due_amount = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    base_amount = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
+    additional_total = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
 
     class Meta:
         model = CustomerInvoice
         fields = [
             "id", "invoice_number", "order", "order_number", "party_name", "invoice_date",
-            "amount", "paid_amount", "due_amount", "payment_status", "due_date", "remarks",
+            "amount", "base_amount", "additional_costs", "additional_total",
+            "paid_amount", "due_amount", "payment_status", "due_date", "remarks",
             "created_by", "created_at",
         ]
-        read_only_fields = ["invoice_number", "payment_status", "created_by"]
+        read_only_fields = ["invoice_number", "payment_status", "created_by", "additional_costs"]
 
     def create(self, validated_data):
         validated_data["created_by"] = self.context["request"].user
@@ -139,6 +142,14 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             if po.po_type == PurchaseOrder.POType.CUSTOMER_SUPPLIED:
                 from . import services
                 services.receive_customer_supplied(po, self.context["request"].user)
+        # Scenario 2: customer-supplied rolls received against an existing order
+        # -> notify Store for each newly-created roll, same as order-time assignment.
+        if po.po_type == PurchaseOrder.POType.CUSTOMER_SUPPLIED and po.related_order_id:
+            from apps.store.models import FabricStock
+            from apps.users.services import notify_store_roll_assigned
+            rolls = list(FabricStock.objects.filter(roll_number__startswith=po.po_number))
+            if rolls:
+                notify_store_roll_assigned(po.related_order, rolls)
         return po
 
     def update(self, instance, validated_data):

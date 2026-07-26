@@ -1,0 +1,66 @@
+{% extends "frontend/base.html" %}
+{% block title %}Alterations - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Alterations — Reprocess</h2>
+  <p class="page-subtitle">Pieces Finishing sent for alteration come back here to Production. Rework them, then record how many passed re-inspection and how many had to be scrapped. The finishing QC results update automatically.</p>
+  <div id="wrap"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["PRODUCTION_SUPERVISOR"]);
+  renderShell("production-alterations", "Alterations");
+
+  function openRework(qc) {
+    const pending = qc.alteration_pending;
+    const passed = numberInput("", () => {}, { min: "0", max: String(pending), step: "1", placeholder: "reworked & now good" });
+    const failed = numberInput("", () => {}, { min: "0", max: String(pending), step: "1", placeholder: "scrapped" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`Rework — ${qc.order_number} · ${qc.color_name || "—"}/${qc.size_name || "—"}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `${pending} altered piece(s) pending rework. Reason: ${qc.alter_reason || "—"}.`),
+      err,
+      field("Reworked — passed", passed),
+      field("Scrapped — failed", failed),
+    ], [
+      el("button", { type: "button", onclick: async () => {
+        err.style.display = "none";
+        const p = Number(passed.value || 0), f = Number(failed.value || 0);
+        if (p < 0 || f < 0 || (p + f) === 0) { err.textContent = "Enter how many passed and/or were scrapped."; err.style.display = "block"; return; }
+        if (p + f > pending) { err.textContent = `Only ${pending} piece(s) are pending — passed + scrapped can't exceed that.`; err.style.display = "block"; return; }
+        try {
+          await apiPost(`/finishing/quality-checks/${qc.id}/record_rework/`, { passed: p, failed: f });
+          closeCrudModal(); notify.success(`Rework recorded: ${p} passed, ${f} scrapped.`); await load();
+        } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Record Rework"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  async function load() {
+    const wrap = document.getElementById("wrap");
+    wrap.innerHTML = "Loading…";
+    let rows;
+    try { rows = await fetchAll("/finishing/quality-checks/"); }
+    catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; return; }
+    const pending = rows.filter(r => (r.alteration_pending || 0) > 0);
+    wrap.innerHTML = "";
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card" }, [
+      el("h3", {}, `🧵 Pieces to Rework (${pending.length})`), body,
+    ]));
+    if (!pending.length) { body.appendChild(el("p", { class: "muted" }, "Nothing to rework — no altered pieces are pending.")); return; }
+    dataTable(body, {
+      columns: [
+        { key: "order_number", label: "Order #" },
+        { label: "Colour", value: r => r.color_name || "", render: r => r.color_name || "—" },
+        { label: "Size", value: r => r.size_name || "", render: r => r.size_name || "—" },
+        { label: "Altered", value: r => Number(r.quantity_altered || 0), render: r => String(r.quantity_altered || 0) },
+        { label: "Pending", value: r => Number(r.alteration_pending || 0), render: r => badge(String(r.alteration_pending)) },
+        { label: "Reason", sortable: false, render: r => r.alter_reason || "—" },
+        { label: "Action", sortable: false, render: r => el("button", { type: "button", onclick: () => openRework(r) }, "Record Rework") },
+      ], rows: pending, pageSize: 12, searchPlaceholder: "Search — order, colour, size…", emptyText: "Nothing to rework.",
+    });
+  }
+  load();
+</script>
+{% endblock %}

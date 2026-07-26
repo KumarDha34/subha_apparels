@@ -51,7 +51,7 @@
         "Add Party",
         () => openQuickAddModal(PURCHASE_QUICK_ADD.party, created => { MASTER.parties.push(created); poState.party = created.id; render(); }))),
       field("Related Order (optional)", selectEl({ onchange: e => { poState.related_order = e.target.value; } },
-        MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), poState.related_order, "None yet")),
+        MASTER.orders.map(o => ({ value: o.id, label: o.order_label })), poState.related_order, "None yet")),
       field("Date", el("input", { type: "date", value: poState.po_date, oninput: e => poState.po_date = e.target.value })),
     ]);
     const banner = el("div", { class: "mode-banner mode-ratio" },

@@ -2,20 +2,16 @@
 {% block title %}Accounts - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Accounts Dashboard</h2>
-  <p class="page-subtitle">Every rupee in and out — purchases, invoices, payments, income, and expenses.</p>
+  <p class="page-subtitle">One-glance financial health — money in, money out, what's owed, and what needs action.</p>
 
-  <div class="grid grid-3" id="summary-cards"></div>
+  <div class="grid grid-4" id="kpi"></div>
 
   <div class="grid grid-2">
-    <div class="card">
-      <h3>Income Breakdown</h3>
-      <div id="income-breakdown"></div>
-    </div>
-    <div class="card">
-      <h3>Expense Breakdown</h3>
-      <div id="expense-breakdown"></div>
-    </div>
+    <div class="card"><h3>💰 Income Breakdown</h3><div id="income-breakdown"></div></div>
+    <div class="card"><h3>💸 Expense Breakdown</h3><div id="expense-breakdown"></div></div>
   </div>
+
+  <div class="card"><h3>⚡ Needs Action</h3><div class="grid grid-4" id="actions"></div></div>
 
   <div class="card">
     <h3>🚚 Dispatched Orders — ready to invoice</h3>
@@ -24,42 +20,96 @@
   </div>
 
   <div class="card">
-    <h3>Quick Links</h3>
-    <div class="form-inline">
-      <a class="btn" href="/accounts/customer-invoices/">Customer Invoices</a>
-      <a class="btn secondary" href="/accounts/quotations/">Quotations</a>
-      <a class="btn secondary" href="/accounts/payments/">Supplier Bills</a>
-      <a class="btn secondary" href="/accounts/income-expenses/">Income &amp; Expenses</a>
-    </div>
+    <h3>🔗 Quick Links</h3>
+    <div class="form-inline" id="links"></div>
   </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-  Auth.guardPage(["ACCOUNTS"]);
+  Auth.guardPage(["ADMIN", "ACCOUNTS"]);
   renderShell("accounts-dashboard", "Accounts");
 
+  function kpiCard(icon, label, value, tone) {
+    const c = tone === "good" ? "#1a7f4b" : tone === "bad" ? "#b3261e" : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.8rem;padding:1.1rem 1.2rem;" }, [
+      el("div", { style: "font-size:1.7rem;line-height:1;" }, icon),
+      el("div", {}, [el("div", { class: "value", style: `font-size:1.5rem;color:${c};line-height:1.1;` }, fmtMoney(value)), el("div", { class: "label" }, label)]),
+    ]);
+  }
+
+  // breakdown as labelled bars (share of the total)
+  function breakdownBars(box, entries, color) {
+    box.innerHTML = "";
+    const total = entries.reduce((s, [, v]) => s + Number(v || 0), 0);
+    if (!total) { box.appendChild(el("p", { class: "muted" }, "No data yet.")); return; }
+    entries.forEach(([label, v]) => {
+      const pct = Math.round(Number(v || 0) / total * 100);
+      box.appendChild(el("div", { style: "margin:0.55rem 0;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:0.25rem;" }, [
+          el("span", {}, label), el("strong", {}, `${fmtMoney(v)}  ·  ${pct}%`)]),
+        el("div", { style: "height:10px;border-radius:6px;background:#f0eeeb;overflow:hidden;" }, [
+          el("div", { style: `height:100%;width:${pct}%;background:${color};border-radius:6px;transition:width .5s ease;` })]),
+      ]));
+    });
+  }
+
+  const INCOME_LABELS = { ADVANCE: "Advance Payments", FINAL: "Final Payments", OTHER: "Other Income" };
+  const EXPENSE_LABELS = { raw_materials: "Raw Materials (fabric + accessories)", additional_costs: "Additional Charges",
+    operator_payments: "Operator Payments", other_expenses: "Other Expenses" };
+
   async function loadSummary() {
-    try {
-      const s = await apiGet("/accounts/summary/");
-      const cards = document.getElementById("summary-cards");
-      const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
-        el("div", { class: "value" }, fmtMoney(value)), el("div", { class: "label" }, label),
-      ]);
-      cards.appendChild(stat("Total Income", s.total_income, "success"));
-      cards.appendChild(stat("Total Expenses", s.total_expenses, "danger"));
-      cards.appendChild(stat("Net Profit", s.net_profit));
+    let s;
+    try { s = await apiGet("/accounts/summary/"); }
+    catch (e) { document.getElementById("kpi").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    const kpi = document.getElementById("kpi");
+    kpi.append(
+      kpiCard("📈", "Total Income", s.total_income, "good"),
+      kpiCard("📉", "Total Expenses", s.total_expenses, "bad"),
+      kpiCard(s.net_profit >= 0 ? "✅" : "⚠️", "Net Profit / Loss", s.net_profit, s.net_profit >= 0 ? "good" : "bad"),
+      kpiCard("🏦", "Cash Position", s.total_income - s.total_expenses, (s.total_income - s.total_expenses) >= 0 ? "good" : "bad"));
 
-      const ib = document.getElementById("income-breakdown");
-      Object.entries(s.income_breakdown).forEach(([k, v]) => ib.appendChild(el("div", {}, `${k}: ${fmtMoney(v)}`)));
+    breakdownBars(document.getElementById("income-breakdown"),
+      Object.entries(s.income_breakdown || {}).map(([k, v]) => [INCOME_LABELS[k] || k, v]), "#1a7f4b");
+    breakdownBars(document.getElementById("expense-breakdown"),
+      Object.entries(s.expense_breakdown || {}).map(([k, v]) => [EXPENSE_LABELS[k] || k, v]), "#e66239");
 
-      const eb = document.getElementById("expense-breakdown");
-      Object.entries(s.expense_breakdown).forEach(([k, v]) => eb.appendChild(el("div", {}, `${k}: ${fmtMoney(v)}`)));
-    } catch (e) {
-      document.getElementById("summary-cards").innerHTML = `<p class="error-msg">${e.message}</p>`;
-    }
+    // ---- needs action ----
+    const pp = s.pending_payments || {};
+    const actionCard = (icon, label, value, sub, href, tone) => el("a", { class: "card stat", href, style: `text-decoration:none;color:inherit;display:block;border-left:3px solid ${tone};` }, [
+      el("div", { style: "font-size:1.3rem;" }, icon),
+      el("div", { class: "value", style: "font-size:1.3rem;margin-top:0.2rem;" }, value),
+      el("div", { class: "label" }, label), sub ? el("div", { class: "muted", style: "font-size:0.75rem;margin-top:0.1rem;" }, sub) : null,
+    ].filter(Boolean));
+    const acts = document.getElementById("actions");
+    const [disp, cinv] = await Promise.all([
+      fetchAll("/finishing/dispatch/").catch(() => []),
+      fetchAll("/accounts/customer-invoices/").catch(() => []),
+    ]);
+    const readyToInvoice = disp.filter(d => ["DISPATCHED", "DELIVERED"].includes(d.status)).length;
+    const today = new Date().toISOString().slice(0, 10);
+    const overdue = cinv.filter(i => i.payment_status !== "PAID" && i.due_date && i.due_date < today);
+    const overdueAmt = overdue.reduce((a, i) => a + Number(i.due_amount || 0), 0);
+    acts.append(
+      actionCard("🚚", "Orders ready to invoice", String(readyToInvoice), "dispatched", "/accounts/customer-invoices/", "#0369a1"),
+      actionCard("⏰", "Overdue invoices", String(overdue.length), fmtMoney(overdueAmt) + " due", "/accounts/customer-invoices/", "#b3261e"),
+      actionCard("💳", "Pending supplier bills", String(pp.to_suppliers ? pp.to_suppliers.count : 0), fmtMoney(pp.to_suppliers ? pp.to_suppliers.amount : 0), "/accounts/payments/", "#b4690e"),
+      actionCard("👷", "Pending operator payments", String(pp.to_operators ? pp.to_operators.count : 0), fmtMoney(pp.to_operators ? pp.to_operators.amount : 0), "/accounts/operator-payments/", "#b4690e"));
   }
   loadSummary();
+
+  // ---- quick links ----
+  const LINKS = [
+    ["Quotations", "/accounts/quotations/", "secondary"],
+    ["Supplier Bills", "/accounts/payments/", "secondary"],
+    ["Party Ledger", "/reports/?key=party-ledger", "secondary"],
+    ["Supplier Ledger", "/reports/?key=supplier-ledger", "secondary"],
+    ["Order P&L", "/accounts/order-pnl/", "secondary"],
+    ["Product Profitability", "/accounts/product-pnl/", "secondary"],
+    ["Operator Payments", "/accounts/operator-payments/", "secondary"],
+  ];
+  const links = document.getElementById("links");
+  LINKS.forEach(([label, href, cls]) => links.appendChild(el("a", { class: `btn ${cls}`, href }, label)));
 
   async function loadDispatched() {
     const wrap = document.getElementById("dispatched-orders");
@@ -71,7 +121,7 @@
         columns: [
           { key: "order_number", label: "Order #" },
           { key: "party_name", label: "Customer", render: d => d.party_name || "—" },
-          { label: "Qty Dispatched", value: d => Number(d.quantity_dispatched || 0) },
+          { label: "Qty Dispatched", num: true, value: d => Number(d.quantity_dispatched || 0) },
           { key: "dispatch_date", label: "Dispatch Date", render: d => d.dispatch_date || "—" },
           { key: "challan_number", label: "Challan #", render: d => d.challan_number || "—" },
           { label: "Status", value: d => d.status, render: d => badge(d.status) },

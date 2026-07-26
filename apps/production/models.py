@@ -121,6 +121,7 @@ class ProcessDispatch(TimeStampedModel):
         WASHING = "WASHING", "Washing"
         PRINTING = "PRINTING", "Printing"
         EMBROIDERY = "EMBROIDERY", "Embroidery"
+        BUTTON = "BUTTON", "Button"
         FINISHING = "FINISHING", "Finishing"
 
     class Status(models.TextChoices):
@@ -152,7 +153,10 @@ class ProcessDispatch(TimeStampedModel):
     loss_review_notes = models.TextField(blank=True)
     is_outsourced = models.BooleanField(default=False)
     vendor = models.ForeignKey("master_data.Vendor", on_delete=models.SET_NULL, null=True, blank=True, related_name="process_dispatches")
-    cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    cost_per_piece = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Outsourced processing rate per piece; total cost = rate x quantity_sent.")
+    cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Total processing cost (auto-computed = cost_per_piece x quantity_sent when a per-piece rate is given).")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.SENT)
     remarks = models.TextField(blank=True)
 
@@ -164,6 +168,34 @@ class ProcessDispatch(TimeStampedModel):
         if self.quantity_received is None:
             return 0
         return max(self.quantity_sent - self.quantity_received, 0)
+
+    @classmethod
+    def available_to_send(cls, order_id):
+        """Pieces on the Production floor free to be sent to a process right now.
+
+        A piece can only go to the next department once it has physically come
+        back from wherever it currently is, so the floor pool is:
+            accepted-from-production
+              - pieces still OUT at any department (sent, not yet received)
+              - pieces already lost at a department (received short)
+        Sending is capped at this number, and pieces out at (say) Washing are
+        NOT re-offered to Printing until Washing returns them."""
+        from django.db.models import Sum
+        from apps.operators.models import BundleAssignment
+        if not order_id:
+            return 0
+        accepted = int(BundleAssignment.objects.filter(
+            bundle__cutting_order__order_id=order_id,
+            status__in=[BundleAssignment.Status.COMPLETED, BundleAssignment.Status.QUALITY_CHECKED],
+        ).aggregate(q=Sum("returned_quantity"))["q"] or 0)
+        out = 0            # sent to a department, not finalised back yet
+        received_loss = 0  # came back short — those pieces are gone
+        for pd in cls.objects.filter(order_id=order_id):
+            if pd.status in (cls.Status.SENT, cls.Status.PENDING_APPROVAL):
+                out += pd.quantity_sent
+            elif pd.status == cls.Status.RECEIVED:
+                received_loss += max(pd.quantity_sent - (pd.quantity_received or 0), 0)
+        return max(accepted - out - received_loss, 0)
 
     def save(self, *args, **kwargs):
         if not self.dispatch_number:

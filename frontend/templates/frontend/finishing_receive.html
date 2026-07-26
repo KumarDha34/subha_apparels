@@ -16,8 +16,30 @@
   const bd = obj => Object.entries(obj || {}).map(([k, v]) => `${k}: ${v}`).join(", ") || "—";
 
   async function receiveOne(pd) {
-    try { await apiPost(`/production/process-dispatches/${pd.id}/receive/`, { quantity_received: pd.quantity_sent }); notify.success(`Received ${pd.order_number}.`); await load(); }
-    catch (e) { notify.error(e.message); }
+    const qtyInput = numberInput(String(pd.quantity_sent), () => {}, { min: "0", max: String(pd.quantity_sent), step: "1" });
+    const reason = el("textarea", { rows: "2", placeholder: "Reason if fewer arrived than were sent", style: "width:100%;" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`Receive — ${pd.order_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        `Production sent ${pd.quantity_sent} pcs. Enter how many actually arrived — you can receive fewer; a shortfall needs a reason and waits for Admin approval.`),
+      err,
+      field("Quantity received", qtyInput),
+      field("Shortage reason (only if fewer)", reason),
+    ], [
+      el("button", { type: "button", onclick: async () => {
+        err.style.display = "none";
+        const q = Number(qtyInput.value);
+        if (!(q >= 0) || q > pd.quantity_sent) { err.textContent = `Enter a quantity between 0 and ${pd.quantity_sent}.`; err.style.display = "block"; return; }
+        if (q < pd.quantity_sent && !reason.value.trim()) { err.textContent = "A reason is required when receiving fewer pieces than sent."; err.style.display = "block"; return; }
+        try {
+          await apiPost(`/production/process-dispatches/${pd.id}/receive/`, { quantity_received: q, loss_reason: reason.value.trim() });
+          closeCrudModal();
+          notify.success(q < pd.quantity_sent ? `Received ${q} of ${pd.quantity_sent} — shortage sent for approval.` : `Received ${pd.order_number}.`);
+          await load();
+        } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Receive"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
   }
   async function receiveAll(rows) {
     const ok = await showConfirm(`Receive all ${rows.length} order(s) from Production?`);

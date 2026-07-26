@@ -22,7 +22,24 @@
 
   let MASTER = { orders: [], operators: [] };
   let PURCHASES = [];
+  let FABRIC_STOCKS = [];
+  let deepLinkHandled = false;
   let active = "fabric";
+
+  // Deep link from a Store roll-assignment notification:
+  // /store/stock/?action=issue&roll=<id>&order=<order>&highlight=true
+  const DL = new URLSearchParams(location.search);
+  const DEEP_LINK = DL.get("action") === "issue" && DL.get("roll")
+    ? { roll: Number(DL.get("roll")), order: DL.get("order") || "", highlight: DL.get("highlight") === "true" } : null;
+
+  function maybeDeepLinkIssue() {
+    if (!DEEP_LINK || deepLinkHandled) return;
+    const s = FABRIC_STOCKS.find(x => x.id === DEEP_LINK.roll);
+    if (!s) { notify.warning("That roll is no longer available to issue."); deepLinkHandled = true; return; }
+    deepLinkHandled = true;
+    if (DEEP_LINK.highlight) document.getElementById("fabric-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+    issueFabricModal(s, DEEP_LINK.order, true);   // pre-filled with the order, deep-link mode
+  }
 
   async function loadMaster() {
     const [orders, operators] = await Promise.all([
@@ -37,7 +54,7 @@
    *  to surface the order an accessory was purchased for. */
   function orderOptions(preferIds) {
     const map = new Map();
-    MASTER.orders.forEach(o => map.set(String(o.id), `${o.order_number} — ${o.party_name}`));
+    MASTER.orders.forEach(o => map.set(String(o.id), o.order_label));
     PURCHASES.forEach(p => { if (p.related_order && !map.has(String(p.related_order))) map.set(String(p.related_order), p.order_number || ("Order #" + p.related_order)); });
     let entries = [...map.entries()];
     if (preferIds && preferIds.length) {
@@ -90,11 +107,21 @@
   ], `/store/accessory-transactions/?accessory_stock=${s.id}`);
 
   /* ==================== issue: fabric → cutting ==================== */
-  function issueFabricModal(s) {
+  // Mark any unread "roll assignment" notifications for this roll as read.
+  async function markRollNotificationsRead(rollId) {
+    try {
+      const notifs = await fetchAll("/users/notifications/my/?is_read=false");
+      for (const n of notifs) {
+        if ((n.link || "").includes(`roll=${rollId}`)) { try { await apiPost(`/users/notifications/${n.id}/mark_read/`, {}); } catch (e) {} }
+      }
+    } catch (e) {}
+  }
+
+  function issueFabricModal(s, presetOrder, deepLink) {
     if (!MASTER.orders.length) return showCrudModal("Issue Fabric to Cutting",
       [el("p", { class: "muted" }, "No confirmed orders yet — ask Merchandising to confirm an order first.")],
       [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")]);
-    const st = { order: "", quantity: "", cutting_date: new Date().toISOString().slice(0, 10), remarks: "" };
+    const st = { order: presetOrder ? String(presetOrder) : "", quantity: "", cutting_date: new Date().toISOString().slice(0, 10), remarks: "" };
     const err = el("div", { class: "error-msg", style: "display:none;" });
     const submit = async () => {
       err.style.display = "none";
@@ -103,21 +130,31 @@
         err.textContent = `Enter a quantity between 0 and ${s.available_quantity} (available).`; err.style.display = "block"; return; }
       try {
         await apiPost("/cutting/cutting-orders/", { order: Number(st.order), fabric_issued: s.id, fabric_issued_quantity: Number(st.quantity), cutting_date: st.cutting_date || null, remarks: st.remarks || "" });
-        closeCrudModal(); notify.success("Fabric issued to Cutting."); refreshFabric();
+        if (deepLink) await markRollNotificationsRead(s.id);
+        closeCrudModal(); notify.success(`Fabric issued to Cutting — roll ${s.roll_number || s.id} for the order.`); refreshFabric();
       } catch (e) { err.textContent = e.message; err.style.display = "block"; }
     };
     showCrudModal(`🧵 Issue — ${s.fabric_type_name} / ${s.color_name} (${s.roll_number || "roll"})`, [
       el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Available: ${s.available_quantity} ${s.unit}. Fabric is always issued for a specific order.`),
       err,
-      field("Order", selectEl({ onchange: e => st.order = e.target.value }, MASTER.orders.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), st.order, "Select order")),
+      field("Order", selectEl({ onchange: e => st.order = e.target.value }, orderOptionsWithPreset(presetOrder), st.order, "Select order")),
       field("Quantity to issue", numberInput(st.quantity, v => st.quantity = v, { min: "0", step: "0.01", placeholder: String(s.available_quantity) })),
       field("Cutting Date", el("input", { type: "date", value: st.cutting_date, oninput: e => st.cutting_date = e.target.value })),
       field("Remarks", el("textarea", { oninput: e => st.remarks = e.target.value })),
     ], [el("button", { type: "button", onclick: submit }, "Issue to Cutting"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
   }
 
+  // Eligible orders, ensuring a notification-preset order still shows as selected.
+  function orderOptionsWithPreset(presetOrder) {
+    const opts = MASTER.orders.map(o => ({ value: o.id, label: o.order_label }));
+    if (presetOrder && !opts.some(o => String(o.value) === String(presetOrder))) {
+      opts.unshift({ value: presetOrder, label: `Order #${presetOrder} (assigned — confirm it first if not listed)` });
+    }
+    return opts;
+  }
+
   /* ================== issue: accessory → operator (order-aware) ================== */
-  function issueAccessoryModal(s) {
+  async function issueAccessoryModal(s) {
     if (!MASTER.operators.length) return showCrudModal("Issue Accessory to Operator",
       [el("p", { class: "muted" }, "No active operators yet — add operators first.")],
       [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")]);
@@ -125,33 +162,62 @@
     const linkedIds = [...new Set(PURCHASES
       .filter(p => p.po_type === "ORDER_SPECIFIC" && p.related_order && p.items.some(i => i.material_type === "ACCESSORY" && String(i.accessory) === String(s.accessory)))
       .map(p => p.related_order))];
-    const st = { operator: "", quantity: "", order: linkedIds.length ? String(linkedIds[0]) : "", issued_date: new Date().toISOString().slice(0, 10), remarks: "" };
+    const st = { operator: "", quantity: "", perPiece: "", perMode: false, order: linkedIds.length ? String(linkedIds[0]) : "", issued_date: new Date().toISOString().slice(0, 10), remarks: "" };
+    // Assignments let us know how many pieces each operator has to work.
+    const ASSIGN = await fetchAll("/operators/assignments/").catch(() => []);
+    const orderNumberFor = id => (MASTER.orders.find(o => String(o.id) === String(id)) || {}).order_number;
+    function operatorPieces() {
+      if (!st.operator) return 0;
+      const on = st.order ? orderNumberFor(st.order) : null;
+      return ASSIGN.filter(a => String(a.operator) === String(st.operator) && (!on || a.order_number === on))
+        .reduce((sum, a) => sum + (a.issued_quantity || 0), 0);
+    }
+    const computedTotal = () => st.perMode ? (Number(st.perPiece) || 0) * operatorPieces() : (Number(st.quantity) || 0);
+
     const err = el("div", { class: "error-msg", style: "display:none;" });
     const submit = async () => {
       err.style.display = "none";
       if (!st.operator) { err.textContent = "Select an operator."; err.style.display = "block"; return; }
-      if (!st.quantity || Number(st.quantity) <= 0 || Number(st.quantity) > Number(s.available_quantity)) {
-        err.textContent = `Enter a quantity between 0 and ${s.available_quantity} (available).`; err.style.display = "block"; return; }
+      const total = computedTotal();
+      if (!total || total <= 0 || total > Number(s.available_quantity)) {
+        err.textContent = `Quantity works out to ${total} — enter a value between 1 and ${s.available_quantity} (available).`; err.style.display = "block"; return; }
       try {
-        const body = { operator: Number(st.operator), accessory_stock: s.id, issued_quantity: Number(st.quantity), issued_date: st.issued_date || null, remarks: st.remarks || "" };
+        let remarks = st.remarks || "";
+        if (st.perMode) remarks = (remarks ? remarks + " · " : "") + `${st.perPiece}/pc × ${operatorPieces()} pcs = ${total}`;
+        const body = { operator: Number(st.operator), accessory_stock: s.id, issued_quantity: total, issued_date: st.issued_date || null, remarks };
         if (st.order) body.order = Number(st.order);
         await apiPost("/production/operator-accessory-issues/", body);
-        closeCrudModal(); notify.success("Accessory issued to operator."); refreshAccessory();
+        closeCrudModal(); notify.success(`Issued ${total} to operator.`); refreshAccessory();
       } catch (e) { err.textContent = e.message; err.style.display = "block"; }
     };
     const orderNote = linkedIds.length
       ? el("div", { class: "mode-banner mode-fixed" }, [el("strong", {}, "Order-specific: "), "this accessory was purchased for the order pre-selected below. Change it only if you're issuing it for a different order."])
       : el("p", { class: "muted", style: "margin-top:-0.3rem;" }, "General stock — pick the order this issue is for (optional).");
-    showCrudModal(`🧷 Issue — ${s.accessory_label}`, [
-      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Available: ${s.available_quantity} ${s.unit || ""}.`),
-      err,
-      field("Operator", selectEl({ onchange: e => st.operator = e.target.value }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), st.operator, "Select operator")),
-      field("Quantity to issue", numberInput(st.quantity, v => st.quantity = v, { min: "0", step: "0.01", placeholder: String(s.available_quantity) })),
-      orderNote,
-      field("For Order", selectEl({ onchange: e => st.order = e.target.value }, orderOptions(linkedIds), st.order, "— any —")),
-      field("Issue Date", el("input", { type: "date", value: st.issued_date, oninput: e => st.issued_date = e.target.value })),
-      field("Remarks", el("textarea", { oninput: e => st.remarks = e.target.value })),
-    ], [el("button", { type: "button", onclick: submit }, "Issue to Operator"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
+
+    function render() {
+      const perHint = el("p", { class: "muted", style: "margin:0.2rem 0 0;" });
+      const paintHint = () => { perHint.textContent = st.perMode
+        ? `${operatorPieces()} piece(s) to work × ${st.perPiece || 0} per piece = ${computedTotal()} to issue.` : ""; };
+      const qtyField = st.perMode
+        ? field("Quantity per piece", numberInput(st.perPiece, v => { st.perPiece = v; paintHint(); }, { min: "0", step: "1", placeholder: "e.g. 5 buttons per garment" }))
+        : field("Quantity to issue", numberInput(st.quantity, v => st.quantity = v, { min: "0", step: "0.01", placeholder: String(s.available_quantity) }));
+      const perToggle = el("label", { style: "display:inline-flex;align-items:center;gap:0.4rem;margin:0.2rem 0;" }, [
+        el("input", { type: "checkbox", ...(st.perMode ? { checked: "checked" } : {}), onchange: e => { st.perMode = e.target.checked; render(); } }),
+        "Issue per piece (× the operator's pieces)",
+      ]);
+      paintHint();
+      showCrudModal(`🧷 Issue — ${s.accessory_label}`, [
+        el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Available: ${s.available_quantity} ${s.unit || ""}.`),
+        err,
+        field("Operator", selectEl({ onchange: e => { st.operator = e.target.value; render(); } }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), st.operator, "Select operator")),
+        orderNote,
+        field("For Order", selectEl({ onchange: e => { st.order = e.target.value; render(); } }, orderOptions(linkedIds), st.order, "— any —")),
+        perToggle, qtyField, perHint,
+        field("Issue Date", el("input", { type: "date", value: st.issued_date, oninput: e => st.issued_date = e.target.value })),
+        field("Remarks", el("textarea", { oninput: e => st.remarks = e.target.value }, st.remarks)),
+      ], [el("button", { type: "button", onclick: submit }, "Issue to Operator"), el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel")]);
+    }
+    render();
   }
 
   /* ============================ fabric panel ============================ */
@@ -166,6 +232,7 @@
       el("div", { class: "card" }, [el("h3", {}, "📤 Fabric Issued to Cutting"), issuesBox]));
     try {
       const items = await fetchAll("/store/fabric-stock/?is_active=true");
+      FABRIC_STOCKS = items;
       stockBox.innerHTML = "";
       dataTable(stockBox, {
         columns: [
@@ -182,6 +249,7 @@
         ], rows: items, pageSize: 12, searchPlaceholder: "Search fabric — type, color, roll…",
         emptyText: "No fabric stock yet — it's added automatically as purchases are received.",
       });
+      maybeDeepLinkIssue();   // if arrived from a roll-assignment notification, open the pre-filled issue modal
     } catch (e) { stockBox.innerHTML = `<p class="error-msg">${e.message}</p>`; }
     try {
       const cos = await fetchAll("/cutting/cutting-orders/");

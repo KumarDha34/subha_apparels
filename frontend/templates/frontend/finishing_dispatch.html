@@ -94,7 +94,7 @@
 
     const form = el("div", { class: "form-inline" }, [
       field("Order (finished)", selectEl({ onchange: e => onOrder(e.target.value) },
-        ORDERS.map(o => ({ value: o.id, label: `${o.order_number} — ${o.party_name}` })), state.order, "Select order")),
+        ORDERS.map(o => ({ value: o.id, label: o.order_label })), state.order, "Select order")),
       field("Challan Number", el("input", { type: "text", value: state.challan, placeholder: "e.g. CH-2026-001", oninput: e => state.challan = e.target.value })),
       field("Quantity to Dispatch", qtyInput),
     ]);

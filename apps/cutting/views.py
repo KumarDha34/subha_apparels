@@ -462,6 +462,37 @@ class BundleViewSet(viewsets.ModelViewSet):
     }
     search_fields = ["bundle_number"]
 
+    @action(detail=False, methods=["post"])
+    def combine(self, request):
+        """Merge several same colour+size bundles from one cutting order into a
+        single bundle -- e.g. two White/S bundles of 20 pcs each become one
+        bundle of 40. Body: {bundle_ids: [...]}. Only bundles still on the
+        cutting floor (status CREATED, not yet sent to Production) qualify; the
+        first selected bundle is kept (its number lives on) and the rest are
+        absorbed into it."""
+        if not (request.user.is_superuser or request.user.role in ("ADMIN", "CUTTING_SUPERVISOR")):
+            raise PermissionDenied("Only a Cutting Supervisor can combine bundles.")
+        ids = request.data.get("bundle_ids") or []
+        if not isinstance(ids, list) or len(ids) < 2:
+            return Response({"detail": "Select at least two bundles to combine."}, status=400)
+        bundles = list(Bundle.objects.filter(id__in=ids))
+        if len(bundles) != len(set(ids)):
+            return Response({"detail": "One or more selected bundles no longer exist."}, status=400)
+        stuck = [b.bundle_number for b in bundles
+                 if b.status != Bundle.Status.CREATED or b.sent_to_production_at is not None]
+        if stuck:
+            return Response({"detail": f"Already past cutting, can't combine: {', '.join(stuck)}."}, status=400)
+        if len({b.cutting_order_id for b in bundles}) != 1 or len({b.color_id for b in bundles}) != 1 \
+                or len({b.size_id for b in bundles}) != 1:
+            return Response({"detail": "Only bundles of the same cutting order, colour and size can be combined."}, status=400)
+        with transaction.atomic():
+            keep = bundles[0]
+            keep.quantity = sum(b.quantity for b in bundles)
+            keep.save(update_fields=["quantity", "updated_at"])
+            for b in bundles[1:]:
+                b.delete()
+        return Response(self.get_serializer(keep).data)
+
     @action(detail=True, methods=["post"])
     def send_to_production(self, request, pk=None):
         """Cutting's explicit hand-off -- Production can't receive a bundle

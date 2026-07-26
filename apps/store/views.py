@@ -26,12 +26,13 @@ from .serializers import (
 
 
 class OrderAdditionalChargeViewSet(viewsets.ModelViewSet):
-    """Extra order costs Store books (transport, customs, labour, washing, etc.)."""
+    """Extra, non-material order costs (transport, courier, customs, storage,
+    sample, testing, penalties, handling). Centralised in Accounts for proper
+    financial control -- only Accounts (and Admin) may book them."""
     queryset = OrderAdditionalCharge.objects.select_related("order__party").all()
     serializer_class = OrderAdditionalChargeSerializer
     permission_classes = [ReadOnlyOrHasRole]
-    # Entered from the Orders list, so whoever manages orders can book charges.
-    required_roles = ["ADMIN", "STORE_MANAGER", "MERCHANDISE"]
+    required_roles = ["ADMIN", "ACCOUNTS"]
     filterset_fields = ["order", "charge_type"]
     search_fields = ["order__order_number"]
 

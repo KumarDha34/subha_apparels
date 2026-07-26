@@ -54,7 +54,7 @@
         { label: "Status", value: inv => inv.payment_status + (isOverdue(inv) ? " overdue" : ""),
           render: inv => el("span", {}, [badge(inv.payment_status), isOverdue(inv) ? el("span", { class: "badge overdue", style: "margin-left:0.4rem;" }, "OVERDUE") : null]) },
         { label: "Actions", sortable: false, render: inv => {
-            const actions = [el("button", { class: "secondary", type: "button", onclick: () => viewInvoice(inv) }, "View")];
+            const actions = [el("button", { class: "secondary", type: "button", onclick: () => viewInvoice(inv) }, "View Details")];
             if (inv.payment_status !== "PAID") actions.push(el("button", { type: "button", onclick: () => openPayModal(inv) }, "Record Payment"));
             actions.push(el("button", { class: "secondary", type: "button", onclick: () => openAddCostModal(inv) }, "Add Cost"));
             return el("div", { class: "form-inline" }, actions);
@@ -84,23 +84,81 @@
     return table;
   }
 
+  function renderComponentBreakdown(po) {
+    const items = (po && po.items) || [];
+    if (!items.length) return el("p", { class: "muted" }, "No line items on this bill.");
+    const table = el("table");
+    table.appendChild(el("thead", {}, el("tr", {}, ["Component", "Qty", "Rate/piece", "Total"].map(h => el("th", {}, h)))));
+    const tb = el("tbody");
+    let sum = 0;
+    items.forEach(it => {
+      const label = it.material_type === "FABRIC"
+        ? `${it.fabric_type_name || "Fabric"}${it.color_name ? " / " + it.color_name : ""}`
+        : (it.accessory_label || it.item_name || "Item");
+      const qty = Number(it.received_quantity || it.quantity || 0);
+      const rate = Number(it.rate || 0);
+      const total = qty * rate; sum += total;
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, label), el("td", {}, `${qty} ${it.unit || ""}`.trim()),
+        el("td", {}, fmtMoney(rate)), el("td", {}, fmtMoney(total)),
+      ]));
+    });
+    table.appendChild(tb);
+    const wrap = el("div", {}, [table, el("div", { style: "text-align:right;font-weight:700;margin-top:0.4rem;color:var(--brand);" }, `Subtotal: ${fmtMoney(sum)}`)]);
+    return wrap;
+  }
+
   async function viewInvoice(inv) {
     const historyBox = el("div", { class: "muted" }, "Loading payment history...");
-    const costsText = inv.additional_costs && Object.keys(inv.additional_costs).length
-      ? Object.entries(inv.additional_costs).map(([k, v]) => `${k}: ${fmtMoney(v)}`).join(", ")
-      : "—";
-    showCrudModal(`💳 ${inv.invoice_number}`, [
-      detailGrid([
-        ["Purchase Order", inv.po_number || "—"], ["Vendor", inv.vendor_name || "—"],
-        ["Invoice Date", inv.invoice_date], ["Due Date", inv.due_date || "—"],
-        ["Subtotal", fmtMoney(inv.subtotal)], ["Tax", fmtMoney(inv.tax_amount)],
-        ["Additional Costs", costsText], ["Total", fmtMoney(inv.total_amount)],
-        ["Paid", fmtMoney(inv.paid_amount)], ["Due", fmtMoney(inv.due_amount)],
-        ["Status", badge(inv.payment_status)],
+    const breakdownBox = el("div", { class: "muted" }, "Loading cost breakdown…");
+
+    // additional costs by type (transport, customs, documentation, handling, other…)
+    const costEntries = Object.entries(inv.additional_costs || {}).filter(([, v]) => Number(v));
+    const additionalCostsNode = costEntries.length
+      ? el("table", { class: "data-table" }, [
+          el("thead", {}, el("tr", {}, [el("th", {}, "Cost Type"), el("th", { style: "text-align:right;" }, "Amount")])),
+          el("tbody", {}, costEntries.map(([k, v]) => el("tr", {}, [
+            el("td", {}, k.charAt(0).toUpperCase() + k.slice(1)), el("td", { style: "text-align:right;" }, fmtMoney(v))]))),
+        ])
+      : el("p", { class: "muted" }, "No additional costs added.");
+
+    // key money figures — highlight the new total, paid and balance due
+    const money = (label, val, strong) => el("div", { style: "display:flex;justify-content:space-between;padding:0.3rem 0;" }, [
+      el("span", { class: strong ? "" : "muted" }, label),
+      strong ? el("strong", {}, fmtMoney(val)) : el("span", {}, fmtMoney(val))]);
+    const summary = el("div", { class: "subcard", style: "padding:0.7rem 1rem;border:1px solid var(--border,#e7e0da);border-radius:12px;" }, [
+      money("Original subtotal", inv.subtotal), money("Tax", inv.tax_amount),
+      money("Additional costs", costEntries.reduce((s, [, v]) => s + Number(v), 0)),
+      el("hr", { style: "border:none;border-top:1px solid var(--border,#e7e0da);margin:0.3rem 0;" }),
+      money("New total amount", inv.total_amount, true),
+      money("Amount already paid", inv.paid_amount),
+      el("div", { style: "display:flex;justify-content:space-between;padding:0.3rem 0;" }, [
+        el("strong", {}, "Balance due"),
+        el("strong", { style: `color:${Number(inv.due_amount) > 0 ? "#b4690e" : "#1a7f4b"};` }, fmtMoney(inv.due_amount))]),
+    ]);
+
+    const footer = [];
+    if (inv.payment_status !== "PAID") footer.push(el("button", { type: "button", onclick: () => openPayModal(inv) }, "💵 Record Payment"));
+    footer.push(el("button", { class: "secondary", type: "button", onclick: () => openAddCostModal(inv) }, "➕ Add Cost"));
+    footer.push(el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close"));
+
+    showCrudModal(`💳 ${inv.invoice_number} — ${inv.vendor_name || ""}`, [
+      el("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;" }, [
+        el("div", { class: "muted" }, `PO ${inv.po_number || "—"} · ${inv.invoice_date}${inv.due_date ? " · due " + inv.due_date : ""}`),
+        el("div", {}, [badge(inv.payment_status), isOverdue(inv) ? el("span", { class: "badge overdue", style: "margin-left:0.4rem;" }, "OVERDUE") : null]),
       ]),
-      el("div", { class: "section-title" }, "Payment History"),
-      historyBox,
-    ], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+      summary,
+      el("div", { class: "section-title" }, "Additional Costs Breakdown"), additionalCostsNode,
+      el("div", { class: "section-title" }, "Cost Component Breakdown (Qty × Rate = Total)"), breakdownBox,
+      el("div", { class: "section-title" }, "Payment History"), historyBox,
+    ], footer, { wide: true });
+
+    if (inv.purchase_order) {
+      try {
+        const po = await apiGet(`/accounts/purchase-orders/${inv.purchase_order}/`);
+        breakdownBox.innerHTML = ""; breakdownBox.appendChild(renderComponentBreakdown(po));
+      } catch (e) { breakdownBox.textContent = "Could not load breakdown: " + e.message; }
+    } else { breakdownBox.textContent = "—"; }
 
     try {
       const records = await fetchAll(`/accounts/payments/?invoice=${inv.id}`);

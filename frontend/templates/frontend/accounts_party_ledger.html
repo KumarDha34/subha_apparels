@@ -1,0 +1,192 @@
+{% extends "frontend/base.html" %}
+{% block title %}Party Ledger - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Party Ledger &amp; Statement of Account</h2>
+  <p class="page-subtitle">What every customer was billed, what they have paid, and what they still owe — with a full running-balance ledger, ageing of overdue receivables, and payment history for each party.</p>
+
+  <div class="grid grid-4" id="pl-kpi"></div>
+
+  <div class="card">
+    <h3>👥 All Parties — receivables at a glance</h3>
+    <p class="card-subtitle">Click <strong>View Statement</strong> for a party's complete running-balance ledger.</p>
+    <div id="parties-wrap" class="muted">Loading…</div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN", "ACCOUNTS"]);
+  renderShell("accounts-party-ledger", "Party Ledger");
+
+  const GREEN = "#1a7f4b", RED = "#b3261e", BLUE = "#0369a1", AMBER = "#b4690e";
+  const AGE_META = [
+    { key: "0-30", label: "0–30 days", color: "#1a7f4b" },
+    { key: "31-60", label: "31–60 days", color: "#b4690e" },
+    { key: "61-90", label: "61–90 days", color: "#e66239" },
+    { key: "90+", label: "90+ days", color: "#b3261e" },
+  ];
+
+  function kpiTile(icon, label, value, tone, sub) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? RED : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.8rem;padding:1.1rem 1.2rem;" }, [
+      el("div", { style: "font-size:1.7rem;line-height:1;" }, icon),
+      el("div", {}, [
+        el("div", { class: "value", style: `font-size:1.5rem;color:${c};line-height:1.1;` }, value),
+        el("div", { class: "label" }, label),
+        sub ? el("div", { class: "muted", style: "font-size:0.75rem;margin-top:0.15rem;" }, sub) : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  function money(v) { return fmtMoney(v); }
+
+  function ageingBars(ageing) {
+    const total = AGE_META.reduce((s, a) => s + Number(ageing[a.key] || 0), 0);
+    if (!total) return el("p", { class: "muted" }, "Nothing outstanding — fully settled. 🎉");
+    return el("div", {}, AGE_META.map(a => {
+      const v = Number(ageing[a.key] || 0);
+      const pct = total ? Math.round(v / total * 100) : 0;
+      return el("div", { style: "margin:.5rem 0;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;font-size:.85rem;margin-bottom:.25rem;" }, [
+          el("span", {}, a.label), el("strong", { style: v > 0 ? `color:${a.color};` : "color:#9aa0aa;font-weight:400;" }, money(v)) ]),
+        el("div", { style: "height:9px;border-radius:5px;background:#f0eeeb;overflow:hidden;" }, [
+          el("div", { style: `height:100%;width:${pct}%;background:${a.color};border-radius:5px;` }) ]),
+      ]);
+    }));
+  }
+
+  async function viewStatement(party) {
+    const closeBtn = el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close");
+    const printBtn = el("button", { class: "secondary", type: "button", onclick: () => printStatement() }, "🖨️ Print");
+    const body = el("div", { class: "muted" }, "Loading…");
+    showCrudModal(`📑 Statement — ${party.name}`, [body], [printBtn, closeBtn], { wide: true });
+
+    window.printStatement = () => {
+      const w = window.open("", "_blank");
+      w.document.write(`<html><head><title>Statement — ${party.name}</title>
+        <style>body{font-family:Arial,sans-serif;margin:24px;color:#1b2233}h1{font-size:20px;margin:0 0 4px}
+        table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}
+        th{background:#f5f5f5}.r{text-align:right}.muted{color:#666}</style></head><body>${body.dataset.print || body.innerHTML}</body></html>`);
+      w.document.close(); w.focus(); w.print();
+    };
+
+    try {
+      const s = await apiGet(`/accounts/party-statement/?party=${party.id}`);
+      body.innerHTML = "";
+      const closing = Number(s.summary.closing || 0);
+
+      // Party info header
+      const info = s.party;
+      body.appendChild(el("div", { class: "card", style: "margin-bottom:1rem;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;flex-wrap:wrap;gap:1rem;" }, [
+          el("div", {}, [
+            el("h3", { style: "margin:0 0 .3rem;" }, info.name),
+            el("div", { class: "muted", style: "font-size:.85rem;line-height:1.6;" }, [
+              el("div", {}, `Code: ${info.code}  ·  Contact: ${info.contact_person}`),
+              el("div", {}, `📞 ${info.phone}   ✉️ ${info.email}`),
+              info.pan_vat !== "—" ? el("div", {}, `PAN/VAT: ${info.pan_vat}`) : null,
+              info.credit_terms !== "—" ? el("div", {}, `Credit terms: ${info.credit_terms}  ·  Limit: ${money(info.credit_limit)}`) : null,
+            ].filter(Boolean)),
+          ]),
+          el("div", { style: "text-align:right;" }, [
+            el("div", { class: "muted", style: "font-size:.75rem;" }, `As of ${s.as_of}`),
+            el("div", { style: `font-size:1.5rem;font-weight:800;color:${closing > 0 ? RED : GREEN};` }, money(closing)),
+            el("div", { class: "muted", style: "font-size:.8rem;" }, closing > 0 ? "Receivable (owes us)" : "Settled"),
+          ]),
+        ]),
+      ]));
+
+      // Summary tiles
+      body.appendChild(el("div", { class: "grid grid-4", style: "margin-bottom:1rem;" }, [
+        kpiTile("🧾", "Total Billed", money(s.summary.total_debit), "info"),
+        kpiTile("💵", "Total Received", money(s.summary.total_credit), "good"),
+        kpiTile(closing > 0 ? "⏳" : "✅", "Outstanding", money(closing), closing > 0 ? "bad" : "good"),
+        kpiTile("📊", "Recovery", s.summary.total_debit ? Math.round(s.summary.total_credit / s.summary.total_debit * 100) + "%" : "—", "info"),
+      ]));
+
+      // Ledger + ageing side by side
+      const ledgerCard = el("div", { class: "card" }, [ el("h4", { style: "margin:0 0 .5rem;" }, "Running-Balance Ledger"), buildLedger(s.entries) ]);
+      const sideCol = el("div", {}, [
+        el("div", { class: "card", style: "margin-bottom:1rem;" }, [ el("h4", { style: "margin:0 0 .5rem;" }, "Ageing of Outstanding"), ageingBars(s.ageing) ]),
+        el("div", { class: "card" }, [ el("h4", { style: "margin:0 0 .5rem;" }, "Payment History"), buildPayments(s.payments) ]),
+      ]);
+      const layout = el("div", { style: "display:grid;grid-template-columns:1.6fr 1fr;gap:1rem;align-items:start;" }, [ledgerCard, sideCol]);
+      body.appendChild(layout);
+
+      // Printable HTML snapshot
+      body.dataset.print = printableHTML(info, s);
+    } catch (e) {
+      body.innerHTML = `<p class="error-msg">Could not load statement: ${e.message}</p>`;
+    }
+  }
+
+  function buildLedger(entries) {
+    if (!entries.length) return el("p", { class: "muted" }, "No ledger entries yet.");
+    const head = el("tr", {}, ["Date", "Voucher", "Particulars", "Debit", "Credit", "Balance"].map((h, i) =>
+      el("th", { style: `padding:.4rem .5rem;border-bottom:2px solid #eee;font-size:.78rem;text-align:${i >= 3 ? "right" : "left"};` }, h)));
+    const rows = entries.map(e => el("tr", {}, [
+      el("td", { style: "padding:.35rem .5rem;font-size:.8rem;white-space:nowrap;" }, e.date),
+      el("td", { style: "padding:.35rem .5rem;font-size:.8rem;" }, e.voucher),
+      el("td", { style: "padding:.35rem .5rem;font-size:.8rem;" }, e.particulars),
+      el("td", { style: `padding:.35rem .5rem;font-size:.8rem;text-align:right;color:${e.debit ? RED : "#ccc"};` }, e.debit ? money(e.debit) : "—"),
+      el("td", { style: `padding:.35rem .5rem;font-size:.8rem;text-align:right;color:${e.credit ? GREEN : "#ccc"};` }, e.credit ? money(e.credit) : "—"),
+      el("td", { style: "padding:.35rem .5rem;font-size:.8rem;text-align:right;font-weight:700;" }, money(e.balance)),
+    ]));
+    return el("div", { style: "overflow-x:auto;" }, [ el("table", { style: "width:100%;border-collapse:collapse;" }, [ el("thead", {}, [head]), el("tbody", {}, rows) ]) ]);
+  }
+
+  function buildPayments(payments) {
+    if (!payments.length) return el("p", { class: "muted" }, "No payments received yet.");
+    return el("div", {}, payments.map(p => el("div", { style: "display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-bottom:1px solid #f2f0ed;" }, [
+      el("div", {}, [ el("div", { style: "font-weight:600;font-size:.85rem;" }, money(p.amount)),
+        el("div", { class: "muted", style: "font-size:.75rem;" }, `${p.date} · ${p.method} · ${p.reference}`) ]),
+      el("span", { style: `color:${GREEN};font-size:1.1rem;` }, "✓"),
+    ])));
+  }
+
+  function printableHTML(info, s) {
+    const rows = s.entries.map(e => `<tr><td>${e.date}</td><td>${e.voucher}</td><td>${e.particulars}</td>
+      <td class="r">${e.debit ? money(e.debit) : ""}</td><td class="r">${e.credit ? money(e.credit) : ""}</td><td class="r">${money(e.balance)}</td></tr>`).join("");
+    return `<h1>Statement of Account</h1><div class="muted">Subha Apparels · As of ${s.as_of}</div>
+      <p><strong>${info.name}</strong> (${info.code})<br>${info.contact_person} · ${info.phone} · ${info.email}</p>
+      <table><thead><tr><th>Date</th><th>Voucher</th><th>Particulars</th><th class="r">Debit</th><th class="r">Credit</th><th class="r">Balance</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+      <p><strong>Total Billed:</strong> ${money(s.summary.total_debit)} &nbsp; <strong>Total Received:</strong> ${money(s.summary.total_credit)} &nbsp; <strong>Balance Due:</strong> ${money(s.summary.closing)}</p>`;
+  }
+
+  async function refresh() {
+    const wrap = document.getElementById("parties-wrap");
+    const kpiBox = document.getElementById("pl-kpi");
+    wrap.textContent = "Loading…";
+    try {
+      const data = await apiGet("/accounts/party-statement/");
+      const parties = data.parties || [];
+      const tBilled = parties.reduce((s, p) => s + p.billed, 0);
+      const tRecv = parties.reduce((s, p) => s + p.received, 0);
+      const tOut = parties.reduce((s, p) => s + p.outstanding, 0);
+      const owing = parties.filter(p => p.outstanding > 0).length;
+      kpiBox.innerHTML = "";
+      kpiBox.append(
+        kpiTile("🧾", "Total Billed", money(tBilled), "info"),
+        kpiTile("💵", "Total Received", money(tRecv), "good"),
+        kpiTile("⏳", "Outstanding", money(tOut), tOut > 0 ? "bad" : "good", `${owing} part${owing === 1 ? "y" : "ies"} owing`),
+        kpiTile("📊", "Recovery", tBilled ? Math.round(tRecv / tBilled * 100) + "%" : "—", "info"));
+
+      wrap.innerHTML = "";
+      dataTable(wrap, {
+        columns: [
+          { label: "Party", key: "name" },
+          { label: "Billed", num: true, value: p => p.billed, render: p => money(p.billed) },
+          { label: "Received", num: true, value: p => p.received, render: p => el("span", { style: `color:${GREEN};` }, money(p.received)) },
+          { label: "Outstanding", num: true, value: p => p.outstanding,
+            render: p => el("strong", { style: `color:${p.outstanding > 0 ? RED : GREEN};` }, money(p.outstanding)) },
+          { label: "", sortable: false, render: p => el("button", { class: "secondary", type: "button", onclick: () => viewStatement(p) }, "View Statement") },
+        ], rows: parties, pageSize: 12, initialSort: { key: "outstanding", dir: "desc" },
+        searchPlaceholder: "Search parties…", emptyText: "No parties yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  refresh();
+</script>
+{% endblock %}

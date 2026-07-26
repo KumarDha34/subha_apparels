@@ -8,7 +8,6 @@
     </div>
     <button id="new-order-btn" type="button">+ New Order</button>
   </div>
-
   <div id="order-builder"></div>
   <div id="orders-table-wrap"></div>
 {% endblock %}
@@ -70,7 +69,7 @@
   let builderVisible = false;
 
   function blankOrder() {
-    return { party: "", order_date: "", order_type: "FIXED_QUANTITY", is_repeat: false, remarks: "", cutting_instruction: "", items: [blankItem()] };
+    return { party: "", order_date: "", order_type: "FIXED_QUANTITY", order_category: "BULK", is_repeat: false, remarks: "", cutting_instruction: "", items: [blankItem()] };
   }
   function blankItem() {
     return { cid: nextClientId++, product: "", fabric_type: "", approved_average: "", inner_required: false, fusing_required: false, resting_needed: false, colors: [blankColor()] };
@@ -153,7 +152,10 @@
 
     const errors = validateOrderState(orderState, { silent: true });
 
-    const isFixed = orderState.order_type === "FIXED_QUANTITY";
+    // A Sample has no order type -- it is always a small fixed run of 1 pc per size.
+    const isSample = orderState.order_category === "SAMPLE";
+    if (isSample) orderState.order_type = "FIXED_QUANTITY";
+    const isFixed = isSample ? true : (orderState.order_type === "FIXED_QUANTITY");
 
     const closeBtn = removeIconBtn("Close", false, () => {
       builderVisible = false; editingOrderId = null; editingOrderNumber = ""; orderState = blankOrder();
@@ -166,7 +168,20 @@
           MASTER.parties.map(p => ({ value: p.id, label: p.name })), orderState.party, "Select party"),
         created => { MASTER.parties.push(created); orderState.party = created.id; renderOrderBuilder(); })),
       field("Order Date", el("input", { type: "date", value: orderState.order_date, oninput: e => orderState.order_date = e.target.value })),
-      field("Order Type", selectEl({ onchange: e => { orderState.order_type = e.target.value; renderOrderBuilder(); } }, [
+      field("Order Category", selectEl({ onchange: e => {
+          orderState.order_category = e.target.value;
+          if (orderState.order_category === "SAMPLE") {
+            // Sample = 1 piece per size, no ratio.
+            orderState.order_type = "FIXED_QUANTITY";
+            orderState.items.forEach(it => it.colors.forEach(c => c.size_lines.forEach(l => { l.quantity = "1"; l.ratio_part = ""; })));
+          }
+          renderOrderBuilder();
+        } }, [
+        { value: "BULK", label: "Bulk Production" },
+        { value: "SAMPLE", label: "Sample" },
+      ], orderState.order_category)),
+      // Order Type is hidden for Sample orders (they have no type).
+      isSample ? null : field("Order Type", selectEl({ onchange: e => { orderState.order_type = e.target.value; renderOrderBuilder(); } }, [
         { value: "FIXED_QUANTITY", label: "Fixed Quantity" },
         { value: "RATIO_BASED", label: "Ratio Based" },
       ], orderState.order_type)),
@@ -174,12 +189,16 @@
         el("input", { type: "checkbox", ...(orderState.is_repeat ? { checked: "checked" } : {}), onchange: e => orderState.is_repeat = e.target.checked }),
         " Repeat order",
       ])),
-    ]);
+    ].filter(Boolean));
+    const sampleBanner = isSample
+      ? el("div", { class: "mode-banner mode-ratio" }, "🧵 Sample order — no order type; it's a single-piece run (1 pc per size) for client approval. Pick the product, fabric, colour and sizes; each size is 1 piece. It goes through the full production chain like any order.")
+      : null;
 
-    const modeBanner = el("div", { class: `mode-banner ${isFixed ? "mode-fixed" : "mode-ratio"}` },
+    // No fixed/ratio banner for samples — they have no order type.
+    const modeBanner = isSample ? null : el("div", { class: `mode-banner ${isFixed ? "mode-fixed" : "mode-ratio"}` },
       isFixed
         ? "📦 Fixed Quantity — enter the exact piece count for every size below. Rolls are optional at order time."
-        : "✂️ Ratio Based — enter the cutting ratio for every size (e.g. 1:2:2:3). Final piece counts are known only after cutting, so at least one roll is required per color.");
+        : "✂️ Ratio Based — enter the cutting ratio for every size (e.g. 1:2:2:3). Final piece counts are known only after cutting. Rolls are optional — pick them now or let Store issue fabric later.");
 
     const remarks = field("Remarks", el("textarea", { oninput: e => orderState.remarks = e.target.value }, orderState.remarks || ""));
     const cuttingInstruction = field("Cutting Instruction (for the Cutting floor)",
@@ -204,7 +223,7 @@
         closeBtn,
       ]),
       errors.length ? el("div", { class: "error-msg" }, errors.join(" ")) : null,
-      header, modeBanner, remarks, cuttingInstruction,
+      header, sampleBanner, modeBanner, remarks, cuttingInstruction,
       el("div", { class: "section-title" }, "Product Items"),
       ...itemBlocks, addItemBtn,
       summary,
@@ -301,7 +320,7 @@
           MASTER.colors.map(c => ({ value: c.id, label: c.hex_code ? `${c.name} (${c.hex_code})` : c.name })), color.color, "Select color"),
         created => { MASTER.colors.push(created); color.color = created.id; renderOrderBuilder(); },
         colorDot(selectedColor?.hex_code))),
-      field(isFixed ? "Rolls to be Used (optional)" : el("span", {}, ["Rolls to be Used ", el("span", { style: "color:var(--danger);font-weight:700;" }, "(required)")]),
+      field("Rolls to be Used (optional — pick now or let Store issue later)",
         el("div", {}, [
           multiSelectEl({ onchange: e => { color.rolls = [...e.target.selectedOptions].map(o => o.value); renderOrderBuilder(); } }, rollOptions, color.rolls),
           rollsHint, rollSelectionSummary(color),
@@ -335,9 +354,14 @@
       selectEl({ onchange: e => { line.size = e.target.value; renderOrderBuilder(); } },
         MASTER.sizes.map(s => ({ value: s.id, label: s.name })), line.size, "Size"),
       created => { MASTER.sizes.push(created); line.size = created.id; renderOrderBuilder(); });
-    const valueInput = isFixed
-      ? numberInput(line.quantity, v => line.quantity = v, { min: "1" })
-      : numberInput(line.ratio_part, v => line.ratio_part = v, { min: "1" });
+    // Sample orders are always 1 piece per size -> quantity is locked at 1.
+    const sampleMode = orderState.order_category === "SAMPLE";
+    if (sampleMode) line.quantity = "1";
+    const valueInput = sampleMode
+      ? el("input", { type: "number", value: "1", readonly: "readonly", title: "Sample = 1 piece per size", style: "width:80px;background:var(--surface,#f2efec);" })
+      : isFixed
+        ? numberInput(line.quantity, v => line.quantity = v, { min: "1" })
+        : numberInput(line.ratio_part, v => line.ratio_part = v, { min: "1" });
     const removeBtn = removeIconBtn("Remove row", color.size_lines.length <= 1, () => { color.size_lines.splice(lidx, 1); renderOrderBuilder(); });
     return el("tr", {}, [el("td", {}, sizeSelect), el("td", {}, valueInput), el("td", {}, removeBtn)]);
   }
@@ -355,7 +379,7 @@
       if (!item.colors.length) errors.push(`Item ${i + 1}: add at least one color.`);
       item.colors.forEach(color => {
         if (!color.color) errors.push(`Item ${i + 1}: select a color.`);
-        if (state.order_type === "RATIO_BASED" && !(color.rolls || []).length) errors.push(`Item ${i + 1}: select at least one roll for each color (required for ratio-based orders).`);
+        // Rolls are optional for every order type — Store can issue fabric later.
         if (!color.size_lines.length) errors.push(`Item ${i + 1}: add at least one size row per color.`);
         color.size_lines.forEach(line => {
           if (!line.size) errors.push(`Item ${i + 1}: select a size on every row.`);
@@ -373,6 +397,7 @@
       party: Number(state.party),
       order_date: state.order_date,
       order_type: state.order_type,
+      order_category: state.order_category || "BULK",
       is_repeat: !!state.is_repeat,
       remarks: state.remarks || "",
       cutting_instruction: state.cutting_instruction || "",
@@ -400,6 +425,7 @@
   function hydrateFromOrder(order) {
     return {
       party: order.party, order_date: order.order_date, order_type: order.order_type,
+      order_category: order.order_category || "BULK",
       is_repeat: order.is_repeat, remarks: order.remarks || "", cutting_instruction: order.cutting_instruction || "",
       items: order.items.map(item => ({
         cid: nextClientId++, product: item.product, fabric_type: item.fabric_type,
@@ -464,6 +490,11 @@
       columns: [
         { label: "Order #", key: "order_number" },
         { label: "Party", key: "party_name" },
+        { label: "Category", value: o => o.order_category || "BULK", render: o => {
+            const cat = badge(o.order_category === "SAMPLE" ? "SAMPLE" : "BULK");
+            if (o.order_category !== "SAMPLE") return cat;
+            return el("div", { style: "display:flex;flex-direction:column;gap:.25rem;align-items:flex-start;" }, [cat, sampleChip(o.sample_status)]);
+          } },
         { label: "Type", key: "order_type", render: o => o.order_type === "FIXED_QUANTITY" ? "Fixed" : "Ratio" },
         { label: "Items", sortable: false, render: o => orderItemsSummary(o) },
         { label: "Total Qty", value: o => (orderTotalQty(o) === "—" ? -1 : orderTotalQty(o)), render: o => String(orderTotalQty(o)) },
@@ -478,7 +509,11 @@
             if (o.status === "DRAFT" || o.status === "CONFIRMED") {
               actions.push(el("button", { class: "danger", type: "button", onclick: () => cancelOrder(o.id) }, "Cancel"));
             }
-            actions.push(el("button", { class: "secondary", type: "button", onclick: () => openCharges(o) }, "₹ Charges"));
+            // Sample sign-off: available once the sample is dispatched/completed and still pending.
+            if (o.can_decide_sample && (o.sample_status === "PENDING" || !o.sample_status)) {
+              actions.push(el("button", { type: "button", style: "background:#1a7f4b;", onclick: () => decideSample(o.id, "APPROVED") }, "✅ Approve"));
+              actions.push(el("button", { class: "danger", type: "button", onclick: () => decideSample(o.id, "REJECTED") }, "❌ Reject"));
+            }
             return el("div", { class: "form-inline" }, actions);
           } },
       ],
@@ -488,58 +523,30 @@
     });
   }
 
-  /** Additional charges booked against an order — transport, customs, labour,
-   *  washing, printing, etc. Entered right here from the orders list, no
-   *  separate screen. */
-  async function openCharges(o) {
-    const listBox = el("div", { class: "muted" }, "Loading…");
-    const st = { charge_type: "", amount: "", remarks: "" };
-    const err = el("div", { class: "error-msg", style: "display:none;" });
-    async function refresh() {
-      try {
-        const charges = await fetchAll(`/store/additional-charges/?order=${o.id}`);
-        listBox.innerHTML = "";
-        if (!charges.length) { listBox.appendChild(el("p", { class: "muted" }, "No additional charges yet.")); return; }
-        const total = charges.reduce((s, c) => s + Number(c.amount || 0), 0);
-        const table = el("table", { class: "data-table" });
-        table.appendChild(el("thead", {}, el("tr", {}, ["Type", "Amount", "Remarks", ""].map(h => el("th", {}, h)))));
-        table.appendChild(el("tbody", {}, charges.map(c => el("tr", {}, [
-          el("td", {}, c.charge_type_display || c.charge_type),
-          el("td", {}, fmtMoney(c.amount)),
-          el("td", {}, c.remarks || "—"),
-          el("td", {}, el("button", { class: "secondary", type: "button", onclick: async () => { try { await apiDelete(`/store/additional-charges/${c.id}/`); refresh(); } catch (e) { notify.error(e.message); } } }, "✕")),
-        ]))));
-        listBox.appendChild(table);
-        listBox.appendChild(el("div", { style: "text-align:right;font-weight:700;margin-top:0.4rem;color:var(--brand);" }, `Total charges: ${fmtMoney(total)}`));
-      } catch (e) { listBox.innerHTML = `<p class="error-msg">${e.message}</p>`; }
-    }
-    const typeSel = selectEl({ onchange: e => st.charge_type = e.target.value }, ORDER_CHARGE_TYPES, "", "Charge type");
-    const amtInput = numberInput(st.amount, v => st.amount = v, { min: "0", step: "0.01", placeholder: "amount" });
-    const remInput = el("input", { type: "text", placeholder: "remarks (optional)", oninput: e => st.remarks = e.target.value });
-    const addBtn = el("button", { type: "button", onclick: async () => {
-      err.style.display = "none";
-      if (!st.charge_type || !st.amount || Number(st.amount) <= 0) { err.textContent = "Pick a charge type and a positive amount."; err.style.display = "block"; return; }
-      try {
-        await apiPost("/store/additional-charges/", { order: o.id, charge_type: st.charge_type, amount: Number(st.amount), remarks: st.remarks || "" });
-        st.amount = ""; amtInput.value = ""; st.remarks = ""; remInput.value = "";
-        notify.success("Charge added."); refresh();
-      } catch (e) { err.textContent = e.message; err.style.display = "block"; }
-    } }, "Add Charge");
-    showCrudModal(`₹ Additional Charges — ${o.order_number}`, [
-      err,
-      el("div", { class: "form-inline", style: "align-items:flex-end;" }, [field("Type", typeSel), field("Amount", amtInput), field("Remarks", remInput), addBtn]),
-      el("div", { class: "section-title" }, "Charges on this order"),
-      listBox,
-    ], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
-    refresh();
-  }
-
   async function viewOrder(id) {
     const order = await apiGet(`/orders/${id}/`);
     const closeBtn = el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close");
     const traceBox = el("div", { class: "muted" }, "Loading traceability...");
+    const sampleBlock = order.order_category === "SAMPLE"
+      ? el("div", { style: "margin:.6rem 0;padding:.8rem 1rem;border-radius:8px;background:var(--surface,#f7f5f2);border-left:4px solid " + (order.sample_status === "APPROVED" ? "#1a7f4b" : order.sample_status === "REJECTED" ? "#b3261e" : "#b4690e") + ";" }, [
+          el("div", { style: "display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;" }, [
+            el("strong", {}, "🧵 Sample Approval:"), sampleChip(order.sample_status),
+            order.sample_decided_date ? el("span", { class: "muted", style: "font-size:.8rem;" }, "on " + order.sample_decided_date) : null,
+          ].filter(Boolean)),
+          order.sample_feedback ? el("div", { class: "muted", style: "margin-top:.4rem;font-size:.85rem;" }, "“" + order.sample_feedback + "”") : null,
+          (order.can_decide_sample && (order.sample_status === "PENDING" || !order.sample_status))
+            ? el("div", { class: "form-inline", style: "margin-top:.6rem;" }, [
+                el("button", { type: "button", style: "background:#1a7f4b;", onclick: () => { closeCrudModal(); decideSample(order.id, "APPROVED"); } }, "✅ Approve"),
+                el("button", { class: "danger", type: "button", onclick: () => { closeCrudModal(); decideSample(order.id, "REJECTED"); } }, "❌ Reject"),
+              ])
+            : (!order.can_decide_sample && (order.sample_status === "PENDING" || !order.sample_status)
+                ? el("div", { class: "muted", style: "margin-top:.4rem;font-size:.8rem;" }, "Can be approved/rejected once the sample is dispatched/completed.")
+                : null),
+        ].filter(Boolean))
+      : null;
     showCrudModal(`📋 ${order.order_number}`, [
       detailGrid([["Party", order.party_name], ["Remarks", order.remarks || "—"]]),
+      sampleBlock,
       el("div", { class: "section-title" }, "Items"),
       renderOrderSummary(order),
       el("div", { class: "section-title" }, "Quantity Traceability"),
@@ -575,6 +582,36 @@
   async function confirmOrder(id) {
     try { await apiPost(`/orders/${id}/confirm/`, {}); await refreshOrders(); }
     catch (e) { notify.error(e.message); }
+  }
+
+  // A small coloured chip for a sample's approval verdict.
+  function sampleChip(status) {
+    const map = {
+      APPROVED: { txt: "✅ Approved", bg: "#1a7f4b" },
+      REJECTED: { txt: "❌ Rejected", bg: "#b3261e" },
+      PENDING:  { txt: "⏳ Pending", bg: "#b4690e" },
+    };
+    const m = map[status] || map.PENDING;
+    return el("span", { style: `display:inline-block;padding:.1rem .5rem;border-radius:999px;font-size:.72rem;font-weight:700;color:#fff;background:${m.bg};` }, m.txt);
+  }
+
+  // Record the client's verdict on a dispatched/completed sample, with an
+  // optional feedback note.
+  async function decideSample(id, decision) {
+    const approve = decision === "APPROVED";
+    const feedback = await showPrompt({
+      title: approve ? "✅ Approve Sample" : "❌ Reject Sample",
+      message: approve ? "Any feedback from the client on this approved sample? (optional)"
+                       : "Why did the client reject this sample? (optional)",
+      placeholder: "Client feedback…", multiline: true, required: false,
+      confirmText: approve ? "Approve" : "Reject", tone: approve ? "brand" : "danger",
+    });
+    if (feedback === null) return; // cancelled
+    try {
+      await apiPost(`/orders/${id}/sample-decision/`, { decision, feedback });
+      notify.success(approve ? "Sample marked as approved." : "Sample marked as rejected.");
+      await refreshOrders();
+    } catch (e) { notify.error(e.message); }
   }
   async function cancelOrder(id) {
     if (!(await showConfirm("Cancel this order? This can't be undone.", { title: "Cancel order", tone: "danger", confirmText: "Yes, cancel" }))) return;

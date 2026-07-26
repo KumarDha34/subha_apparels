@@ -28,8 +28,50 @@ class OperatorViewSet(viewsets.ModelViewSet):
     serializer_class = OperatorSerializer
     permission_classes = [ReadOnlyOrHasRole]
     required_roles = ["ADMIN", "PRODUCTION_SUPERVISOR"]
-    filterset_fields = ["operator_type", "skill_level", "is_active"]
+    filterset_fields = ["operator_type","is_active"]
     search_fields = ["name", "contact", "email"]
+
+    @action(detail=True, methods=["post"])
+    def add_member(self, request, pk=None):
+        """Add an individual operator as a member of this GROUP."""
+        group = self.get_object()
+        if group.operator_type != Operator.OperatorType.GROUP:
+            return Response({"detail": "Members can only be added to a GROUP operator."}, status=400)
+        try:
+            member = Operator.objects.get(pk=request.data.get("member_id"))
+        except Operator.DoesNotExist:
+            return Response({"detail": "Operator not found."}, status=404)
+        if member.id == group.id:
+            return Response({"detail": "A group can't be its own member."}, status=400)
+        member.group = group
+        member.save(update_fields=["group", "updated_at"])
+        return Response(self.get_serializer(group).data)
+
+    @action(detail=True, methods=["post"])
+    def remove_member(self, request, pk=None):
+        """Remove a member from this group."""
+        group = self.get_object()
+        try:
+            member = group.members.get(pk=request.data.get("member_id"))
+        except Operator.DoesNotExist:
+            return Response({"detail": "That operator isn't a member of this group."}, status=404)
+        member.group = None
+        member.is_group_leader = False
+        member.save(update_fields=["group", "is_group_leader", "updated_at"])
+        return Response(self.get_serializer(group).data)
+
+    @action(detail=True, methods=["post"])
+    def set_leader(self, request, pk=None):
+        """Mark one member as the group's leader (only one at a time)."""
+        group = self.get_object()
+        try:
+            member = group.members.get(pk=request.data.get("member_id"))
+        except Operator.DoesNotExist:
+            return Response({"detail": "That operator isn't a member of this group."}, status=404)
+        group.members.filter(is_group_leader=True).update(is_group_leader=False)
+        member.is_group_leader = True
+        member.save(update_fields=["is_group_leader", "updated_at"])
+        return Response(self.get_serializer(group).data)
 
     @action(detail=True, methods=["get"])
     def report(self, request, pk=None):
@@ -152,6 +194,95 @@ class OperatorViewSet(viewsets.ModelViewSet):
         )
         return Response(list(rows))
 
+    @action(detail=True, methods=["post"])
+    def add_member(self, request, pk=None):
+        """Add an individual operator to a group"""
+        group = self.get_object()
+        
+        if group.operator_type != Operator.OperatorType.GROUP:
+            return Response(
+                {"detail": "Only GROUP type operators can have members."}, 
+                status=400
+            )
+        
+        member_id = request.data.get("member_id")
+        if not member_id:
+            return Response({"detail": "member_id is required."}, status=400)
+        
+        try:
+            member = Operator.objects.get(pk=member_id)
+        except Operator.DoesNotExist:
+            return Response({"detail": "Member not found."}, status=404)
+        
+        if member.operator_type == Operator.OperatorType.GROUP:
+            return Response(
+                {"detail": "A group cannot be added as a member to another group."}, 
+                status=400
+            )
+        
+        # Remove from any existing group
+        if member.group:
+            member.group = None
+            member.save()
+        
+        member.group = group
+        member.is_group_leader = False
+        member.save()
+        
+        return Response({
+            "detail": f"{member.name} added to group {group.name}.",
+            "group": self.get_serializer(group).data
+        })
+
+    @action(detail=True, methods=["post"])
+    def remove_member(self, request, pk=None):
+        """Remove a member from a group"""
+        group = self.get_object()
+        member_id = request.data.get("member_id")
+        
+        if not member_id:
+            return Response({"detail": "member_id is required."}, status=400)
+        
+        try:
+            member = Operator.objects.get(pk=member_id, group=group)
+        except Operator.DoesNotExist:
+            return Response({"detail": "Member not found in this group."}, status=404)
+        
+        member.group = None
+        member.is_group_leader = False
+        member.save()
+        
+        return Response({
+            "detail": f"{member.name} removed from group.",
+            "group": self.get_serializer(group).data
+        })
+
+    @action(detail=True, methods=["post"])
+    def set_leader(self, request, pk=None):
+        """Set a member as group leader"""
+        group = self.get_object()
+        member_id = request.data.get("member_id")
+        
+        if not member_id:
+            return Response({"detail": "member_id is required."}, status=400)
+        
+        try:
+            member = Operator.objects.get(pk=member_id, group=group)
+        except Operator.DoesNotExist:
+            return Response({"detail": "Member not found in this group."}, status=404)
+        
+        # Remove leader status from all members
+        group.members.filter(is_group_leader=True).update(is_group_leader=False)
+        
+        # Set new leader
+        member.is_group_leader = True
+        member.save()
+        
+        return Response({
+            "detail": f"{member.name} is now group leader.",
+            "group": self.get_serializer(group).data
+        })
+
 
 class BundleAssignmentViewSet(viewsets.ModelViewSet):
     """Bundle -> Operator lifecycle: ASSIGNED -> IN_PROGRESS -> COMPLETED -> QUALITY_CHECKED.
@@ -166,7 +297,74 @@ class BundleAssignmentViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ("my", "start", "return_bundle", "quality_check"):
             return [IsAuthenticated()]
+        if self.action == "pay_pieces":
+            # Accounts pays operators piece-by-piece.
+            self.required_roles = ["ADMIN", "ACCOUNTS", "PRODUCTION_SUPERVISOR"]
         return [ReadOnlyOrHasRole()]
+
+    @action(detail=False, methods=["get"])
+    def work_summary(self, request):
+        """Complete piece-level work + pay breakdown for one operator.
+        Query: ?operator=<id>. Returns every completed bundle (order, product,
+        size, pieces completed / paid / pending, rate, amounts), the bundles
+        still in progress, and roll-up totals -- so Accounts can pay specific
+        pieces and see exactly what's paid, pending or still being worked."""
+        op_id = request.query_params.get("operator")
+        if not op_id:
+            return Response({"detail": "operator is required."}, status=400)
+        qs = self.get_queryset().filter(operator_id=op_id)
+        done = qs.filter(status__in=[BundleAssignment.Status.COMPLETED, BundleAssignment.Status.QUALITY_CHECKED])
+        in_prog = qs.filter(status__in=[BundleAssignment.Status.ASSIGNED, BundleAssignment.Status.IN_PROGRESS, BundleAssignment.Status.RETURNED])
+        completed = self.get_serializer(done, many=True).data
+        in_progress = self.get_serializer(in_prog, many=True).data
+        return Response({
+            "completed": completed,
+            "in_progress": in_progress,
+            "totals": {
+                "pieces_completed": sum(r["returned_quantity"] or 0 for r in completed),
+                "pieces_paid": sum(r["paid_quantity"] or 0 for r in completed),
+                "pieces_pending": sum(r["pending_quantity"] for r in completed),
+                "pieces_in_progress": sum((r["issued_quantity"] or 0) for r in in_progress),
+                "amount_earned": round(sum(r["earned_amount"] for r in completed), 2),
+                "amount_paid": round(sum(r["paid_amount"] for r in completed), 2),
+                "amount_pending": round(sum(r["pending_amount"] for r in completed), 2),
+            },
+        })
+
+    @action(detail=True, methods=["post"])
+    def pay_pieces(self, request, pk=None):
+        """Pay specific completed pieces on this bundle. Body: {quantity}
+        (defaults to all pending). Marks the pieces paid and books an
+        OperatorIncome record for rate x pieces."""
+        a = self.get_object()
+        if a.status not in (BundleAssignment.Status.COMPLETED, BundleAssignment.Status.QUALITY_CHECKED):
+            return Response({"detail": "Only completed / quality-checked pieces can be paid."}, status=400)
+        pending = max((a.returned_quantity or 0) - (a.paid_quantity or 0), 0)
+        if pending <= 0:
+            return Response({"detail": "Nothing pending to pay on this bundle."}, status=400)
+        raw = request.data.get("quantity")
+        try:
+            qty = pending if raw in (None, "") else int(raw)
+        except (TypeError, ValueError):
+            return Response({"detail": "quantity must be a whole number."}, status=400)
+        if qty <= 0 or qty > pending:
+            return Response({"detail": f"quantity must be between 1 and {pending} (pending)."}, status=400)
+        rate = Decimal(a.rate_per_piece or 0)
+        amount = rate * qty
+        a.paid_quantity = (a.paid_quantity or 0) + qty
+        a.save(update_fields=["paid_quantity", "updated_at"])
+        co = a.bundle.cutting_order
+        onum = co.order.order_number if (co and co.order_id) else ""
+        today = date.today()
+        income = OperatorIncome.objects.create(
+            operator=a.operator, period_start=today, period_end=today,
+            bundles_completed=1, pieces_completed=qty, rate_applied=rate,
+            total_income=amount, paid_amount=amount,
+            payment_status=OperatorIncome.PaymentStatus.PAID, payment_date=today,
+            remarks=f"Paid {qty} pc(s) of bundle {a.bundle.bundle_number}" + (f" (order {onum})" if onum else ""),
+        )
+        return Response({"paid": qty, "amount": float(amount), "income": income.id,
+                         "assignment": self.get_serializer(a).data})
 
     def _check_owns_assignment(self, request, assignment):
         if request.user.role == "ADMIN" or request.user.role == "PRODUCTION_SUPERVISOR":
@@ -213,12 +411,23 @@ class BundleAssignmentViewSet(viewsets.ModelViewSet):
         if returned_quantity < 0 or returned_quantity > issued_quantity:
             return Response({"detail": f"returned_quantity must be between 0 and {issued_quantity} (issued)."}, status=400)
 
+        # Return date: defaults to today, may be a future date, never a past one.
+        return_date = request.data.get("return_date")
+        completion = date.today()
+        if return_date:
+            try:
+                completion = date.fromisoformat(str(return_date))
+            except ValueError:
+                return Response({"detail": "return_date must be a valid date (YYYY-MM-DD)."}, status=400)
+            if completion < date.today():
+                return Response({"detail": "return_date cannot be in the past."}, status=400)
+
         assignment.returned_quantity = returned_quantity
+        assignment.completion_date = completion   # record when the pieces came back
         shortage = issued_quantity - returned_quantity
         if shortage <= 0:
             assignment.shortage_reason_status = BundleAssignment.ShortageStatus.NOT_APPLICABLE
             assignment.status = BundleAssignment.Status.COMPLETED
-            assignment.completion_date = date.today()
             assignment.bundle.status = Bundle.Status.COMPLETED
             assignment.bundle.save(update_fields=["status"])
         else:

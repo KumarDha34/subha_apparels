@@ -14,8 +14,49 @@
   renderShell("production-bundle-allocation", "Bundle Allocation");
 
   let MASTER = { bundles: [], operators: [] };
+  let ASSIGNMENTS = [];
+  let productRateCache = {};
   let assignState = { product: "", bundle: "", operator: "", issued_quantity: "", rate_per_piece: "" };
 
+  // ===================== RATE FUNCTIONS =====================
+  
+  function getRateForProduct(productId) {
+    if (!productId) return "";
+    
+    // 1. Check localStorage
+    const stored = localStorage.getItem(`product_rate_${productId}`);
+    if (stored !== null) {
+        return stored;
+    }
+    
+    // 2. Check cache
+    if (productRateCache[productId]) {
+        return productRateCache[productId];
+    }
+    
+    // 3. Check existing assignments
+    const existing = ASSIGNMENTS.find(a => 
+        String(a.product) === String(productId) && a.rate_per_piece != null
+    );
+    
+    if (existing) {
+        const rate = String(existing.rate_per_piece);
+        productRateCache[productId] = rate;
+        localStorage.setItem(`product_rate_${productId}`, rate);
+        return rate;
+    }
+    
+    return "";
+  }
+
+  function saveRateForProduct(productId, rate) {
+    if (productId && rate) {
+        productRateCache[productId] = rate;
+        localStorage.setItem(`product_rate_${productId}`, rate);
+    }
+  }
+
+  // ===================== LOAD MASTER DATA =====================
   async function loadMaster() {
     const [bundles, operators] = await Promise.all([
       fetchAll("/cutting/bundles/?status=RECEIVED"),
@@ -24,13 +65,17 @@
     MASTER = { bundles, operators };
   }
 
-  // Distinct products among the ready-to-allocate bundles.
   function productOptions() {
     const seen = new Map();
-    MASTER.bundles.forEach(b => { if (b.product != null && !seen.has(String(b.product))) seen.set(String(b.product), `${b.product_code || ""} — ${b.product_name || ""}`); });
+    MASTER.bundles.forEach(b => { 
+      if (b.product != null && !seen.has(String(b.product))) {
+        seen.set(String(b.product), `${b.product_code || ""} — ${b.product_name || ""}`);
+      }
+    });
     return [...seen.entries()].map(([value, label]) => ({ value, label }));
   }
 
+  // ===================== RENDER ALLOCATION FORM =====================
   function renderAssignForm() {
     const wrap = document.getElementById("assign-wrap");
     wrap.innerHTML = "";
@@ -42,146 +87,294 @@
       return;
     }
     const errorBox = el("div", { class: "error-msg", style: "display:none;" });
-    // Bundles shown only for the chosen product — so you always know which
-    // product you're allocating. Each option shows size (+ colour · qty), no code.
+    
     const bundlesForProduct = assignState.product
       ? MASTER.bundles.filter(b => String(b.product) === String(assignState.product))
       : [];
+    
+    // ✅ Show rate hint if product is selected
+    const rateHint = assignState.product && assignState.rate_per_piece 
+        ? el("div", { class: "mode-banner mode-fixed", style: "margin-top:0.3rem;" }, 
+            `✅ Rate ₹${assignState.rate_per_piece}/piece already set for this product — will auto-apply to all bundles`)
+        : null;
+    
     const form = el("div", { class: "form-inline" }, [
-      field("Product", selectEl({ onchange: e => { assignState.product = e.target.value; assignState.bundle = ""; renderAssignForm(); } },
-        productOptions(), assignState.product, "Select product")),
-      field("Bundle (by size)", selectEl({ onchange: e => { assignState.bundle = e.target.value; } },
-        bundlesForProduct.map(b => ({ value: b.id, label: `Size ${b.size_name} · ${b.color_name} · ${b.quantity} pcs${b.order_number ? " · " + b.order_number : ""}` })),
-        assignState.bundle, assignState.product ? "Select size / bundle" : "Select a product first")),
-      field("Operator", selectEl({ onchange: e => assignState.operator = e.target.value },
-        MASTER.operators.map(o => ({ value: o.id, label: o.name })), assignState.operator, "Select operator")),
-      field("Rate / Piece (Rs.)", numberInput(assignState.rate_per_piece, v => assignState.rate_per_piece = v, { min: "0", step: "0.01", placeholder: "operator pay per piece", required: "required" })),
-      field("Issued Qty (optional)", numberInput(assignState.issued_quantity, v => assignState.issued_quantity = v, { min: "0", placeholder: "defaults to bundle qty" })),
+      field("Product", selectEl({ 
+        onchange: e => {
+          assignState.product = e.target.value;
+          assignState.bundle = "";
+          // ✅ Auto-restore rate
+          const rate = getRateForProduct(assignState.product);
+          if (rate) {
+            assignState.rate_per_piece = rate;
+          } else {
+            assignState.rate_per_piece = "";
+          }
+          renderAssignForm();
+        }
+      }, productOptions(), assignState.product, "Select product")),
+      
+      field("Bundle (by size)", selectEl({ 
+        onchange: e => { assignState.bundle = e.target.value; } 
+      }, bundlesForProduct.map(b => ({ 
+        value: b.id, 
+        label: `Size ${b.size_name} · ${b.color_name} · ${b.quantity} pcs${b.order_number ? " · " + b.order_number : ""}` 
+      })), assignState.bundle, assignState.product ? "Select size / bundle" : "Select a product first")),
+      
+      field("Operator", selectEl({ 
+        onchange: e => assignState.operator = e.target.value 
+      }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), assignState.operator, "Select operator")),
+      
+      // ✅ Rate field with persistence
+      field("Rate / Piece (Rs.) — set once per product", 
+        numberInput(assignState.rate_per_piece, 
+          v => {
+            assignState.rate_per_piece = v;
+            if (assignState.product) {
+              saveRateForProduct(assignState.product, v);
+            }
+          }, 
+          { 
+            min: "0", 
+            step: "0.01", 
+            placeholder: "Enter rate once for this product", 
+            required: "required",
+            id: "rate-input"
+          }
+        )
+      ),
+      
+      rateHint,  // ✅ Show hint if rate exists
+      
+      field("Issued Qty (optional)", numberInput(assignState.issued_quantity, 
+        v => assignState.issued_quantity = v, 
+        { min: "0", placeholder: "defaults to bundle qty" }
+      )),
     ]);
+    
     wrap.appendChild(el("div", { class: "card" }, [
       el("h3", {}, "Allocate Bundle to Operator"),
       errorBox, form,
-      el("div", { class: "form-inline", style: "margin-top:0.85rem;" }, [el("button", { type: "button", onclick: allocate }, "Allocate")]),
+      el("div", { class: "form-inline", style: "margin-top:0.85rem;" }, [
+        el("button", { type: "button", onclick: allocate }, "Allocate")
+      ]),
     ]));
     wrap._errorBox = errorBox;
   }
 
+  // ===================== ALLOCATE FUNCTION =====================
   async function allocate() {
     const errorBox = document.getElementById("assign-wrap")._errorBox;
     if (errorBox) errorBox.style.display = "none";
     if (!assignState.bundle || !assignState.operator) {
-      if (errorBox) { errorBox.textContent = "Select a bundle and an operator."; errorBox.style.display = "block"; }
-      return;
+        if (errorBox) { errorBox.textContent = "Select a bundle and an operator."; errorBox.style.display = "block"; }
+        return;
     }
     if (assignState.rate_per_piece === "" || Number(assignState.rate_per_piece) < 0) {
-      if (errorBox) { errorBox.textContent = "Enter the operator's pay rate per piece."; errorBox.style.display = "block"; }
-      return;
+        if (errorBox) { errorBox.textContent = "Enter the operator's pay rate per piece."; errorBox.style.display = "block"; }
+        return;
     }
     try {
-      const body = { bundle: Number(assignState.bundle), operator: Number(assignState.operator), rate_per_piece: Number(assignState.rate_per_piece) };
-      if (assignState.issued_quantity) body.issued_quantity = Number(assignState.issued_quantity);
-      await apiPost("/operators/assignments/", body);
-      notify.success("Bundle allocated — operator started.");
-      assignState = { product: assignState.product, bundle: "", operator: "", issued_quantity: "", rate_per_piece: "" };
-      await loadMaster();
-      renderAssignForm();
-      await refreshAssignments();
+        // ✅ Save rate before allocation
+        if (assignState.product) {
+            saveRateForProduct(assignState.product, assignState.rate_per_piece);
+        }
+        
+        const body = { 
+            bundle: Number(assignState.bundle), 
+            operator: Number(assignState.operator), 
+            rate_per_piece: Number(assignState.rate_per_piece) 
+        };
+        if (assignState.issued_quantity) body.issued_quantity = Number(assignState.issued_quantity);
+        await apiPost("/operators/assignments/", body);
+        notify.success("Bundle allocated — operator started.");
+        
+        // ✅ Keep product and rate, clear only bundle and operator
+        const currentProduct = assignState.product;
+        const currentRate = assignState.rate_per_piece;
+        
+        assignState = { 
+            product: currentProduct, 
+            bundle: "", 
+            operator: "", 
+            issued_quantity: "", 
+            rate_per_piece: currentRate  // ✅ Keep rate
+        };
+        
+        await loadMaster();
+        renderAssignForm();
+        await refreshAssignments();
     } catch (e) {
-      if (errorBox) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
-      else notify.error(e.message);
+        if (errorBox) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+        else notify.error(e.message);
     }
   }
 
+  // ===================== HELPER FUNCTIONS =====================
   const bundleLabel = a => `${a.product_code || ""} · Size ${a.size_name || "?"}${a.color_name ? " · " + a.color_name : ""}`;
-
-  async function returnAssignment(a) {
-    const qty = await showPrompt({ title: `Return — ${bundleLabel(a)}`,
-      label: `Pieces returned by ${a.operator_name} (issued ${a.issued_quantity})`,
-      number: true, min: 0, max: a.issued_quantity, value: a.issued_quantity, confirmText: "Continue" });
-    if (qty === null || qty === "") return;
-    const returned = Number(qty);
-    const body = { returned_quantity: returned };
-    if (returned < a.issued_quantity) {
-      const reason = await showPrompt({ title: "Shortage — reason required",
-        message: `${a.issued_quantity - returned} piece(s) short. Give a reason — an Admin reviews it before it's accepted.`,
-        label: "Reason for the missing pieces", multiline: true, required: true, confirmText: "Submit for review" });
-      if (!reason) { notify.warning("A reason is required when returned pieces are fewer than issued."); return; }
-      body.shortage_reason = reason;
-    }
-    try { await apiPost(`/operators/assignments/${a.id}/return/`, body); notify.success("Pieces returned."); await refreshAssignments(); }
-    catch (e) { notify.error(e.message); }
-  }
-
-  async function reassignAssignment(a) {
-    if (!MASTER.operators.length) { notify.warning("No operators available to reassign to."); return; }
-    let chosen = "";
-    const sel = selectEl({ onchange: e => chosen = e.target.value }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), "", "Select operator");
-    const err = el("div", { class: "error-msg", style: "display:none;" });
-    showCrudModal(`Reassign — ${bundleLabel(a)}`, [err, field("New operator", sel)], [
-      el("button", { type: "button", onclick: async () => {
-        if (!chosen) { err.textContent = "Select an operator."; err.style.display = "block"; return; }
-        try { await apiPost(`/operators/assignments/${a.id}/reassign/`, { operator: Number(chosen) }); closeCrudModal(); notify.success("Reassigned."); await refreshAssignments(); }
-        catch (e) { err.textContent = e.message; err.style.display = "block"; }
-      } }, "Reassign"),
-      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
-    ]);
-  }
-
-  async function reviewShortage(a, approved) {
-    const notes = await showPrompt({ title: approved ? "Approve shortage" : "Reject shortage",
-      message: `Reason given: ${a.shortage_reason || "—"}`, label: approved ? "Notes (optional)" : "Why are you rejecting?",
-      multiline: true, required: !approved, confirmText: approved ? "Approve" : "Reject", tone: approved ? "brand" : "danger" });
-    if (notes === null) return;
-    try { await apiPost(`/operators/assignments/${a.id}/review_shortage/`, { approved, notes }); notify.success(approved ? "Approved." : "Rejected."); await refreshAssignments(); }
-    catch (e) { notify.error(e.message); }
-  }
 
   function renderShortageCell(a) {
     if (a.shortage_reason_status === "NOT_APPLICABLE") return "—";
     if (a.shortage_reason_status === "PENDING_REVIEW") {
-      if (Auth.getRole() === "ADMIN") {
+        if (Auth.getRole() === "ADMIN") {
+            return el("div", {}, [
+                badge(a.shortage_reason_status), 
+                el("div", { class: "muted", style: "margin:0.3rem 0;" }, a.shortage_reason),
+                el("div", { class: "form-inline" }, [
+                    el("button", { type: "button", onclick: () => reviewShortage(a, true) }, "Approve"),
+                    el("button", { class: "secondary", type: "button", onclick: () => reviewShortage(a, false) }, "Reject"),
+                ]),
+            ]);
+        }
         return el("div", {}, [
-          badge(a.shortage_reason_status), el("div", { class: "muted", style: "margin:0.3rem 0;" }, a.shortage_reason),
-          el("div", { class: "form-inline" }, [
-            el("button", { type: "button", onclick: () => reviewShortage(a, true) }, "Approve"),
-            el("button", { class: "secondary", type: "button", onclick: () => reviewShortage(a, false) }, "Reject"),
-          ]),
+            badge(a.shortage_reason_status), 
+            el("div", { class: "muted", style: "margin-top:0.3rem;" }, a.shortage_reason)
         ]);
-      }
-      return el("div", {}, [badge(a.shortage_reason_status), el("div", { class: "muted", style: "margin-top:0.3rem;" }, a.shortage_reason)]);
     }
-    return el("div", {}, [badge(a.shortage_reason_status), el("div", { class: "muted", style: "margin-top:0.3rem;" }, a.shortage_review_notes || "")]);
+    return el("div", {}, [
+        badge(a.shortage_reason_status), 
+        el("div", { class: "muted", style: "margin-top:0.3rem;" }, a.shortage_review_notes || "")
+    ]);
   }
 
+  async function reviewShortage(a, approved) {
+    const notes = await showPrompt({ 
+        title: approved ? "Approve shortage" : "Reject shortage",
+        message: `Reason given: ${a.shortage_reason || "—"}`, 
+        label: approved ? "Notes (optional)" : "Why are you rejecting?",
+        multiline: true, 
+        required: !approved, 
+        confirmText: approved ? "Approve" : "Reject", 
+        tone: approved ? "brand" : "danger" 
+    });
+    if (notes === null) return;
+    try { 
+        await apiPost(`/operators/assignments/${a.id}/review_shortage/`, { approved, notes }); 
+        notify.success(approved ? "Approved." : "Rejected."); 
+        await refreshAssignments(); 
+    } catch (e) { 
+        notify.error(e.message); 
+    }
+  }
+
+  async function returnAssignment(a) {
+    const today = new Date().toISOString().slice(0, 10);
+    const qtyInput = numberInput(String(a.issued_quantity), () => {}, { min: "0", max: String(a.issued_quantity), step: "1" });
+    const dateInput = el("input", { type: "date", value: today, min: today });   // today or later — never past
+    const reason = el("textarea", { rows: "2", placeholder: "Reason if fewer returned than issued", style: "width:100%;" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`Return — ${bundleLabel(a)}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `Issued ${a.issued_quantity} to ${a.operator_name}. Enter pieces returned and the return date (today or later).`),
+      err,
+      field("Pieces returned", qtyInput),
+      field("Return date", dateInput),
+      field("Shortage reason (only if fewer)", reason),
+    ], [
+      el("button", { type: "button", onclick: async () => {
+        err.style.display = "none";
+        const returned = Number(qtyInput.value);
+        if (!(returned >= 0) || returned > a.issued_quantity) { err.textContent = `Enter a number between 0 and ${a.issued_quantity}.`; err.style.display = "block"; return; }
+        if (!dateInput.value || dateInput.value < today) { err.textContent = "Return date must be today or a future date."; err.style.display = "block"; return; }
+        const body = { returned_quantity: returned, return_date: dateInput.value };
+        if (returned < a.issued_quantity) {
+          if (!reason.value.trim()) { err.textContent = "A reason is required when fewer pieces are returned than issued."; err.style.display = "block"; return; }
+          body.shortage_reason = reason.value.trim();
+        }
+        try { await apiPost(`/operators/assignments/${a.id}/return/`, body); closeCrudModal(); notify.success("Pieces returned."); await refreshAssignments(); }
+        catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Submit Return"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  async function reassignAssignment(a) {
+    if (!MASTER.operators.length) { 
+        notify.warning("No operators available to reassign to."); 
+        return; 
+    }
+    let chosen = "";
+    const sel = selectEl({ 
+        onchange: e => chosen = e.target.value 
+    }, MASTER.operators.map(o => ({ value: o.id, label: o.name })), "", "Select operator");
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`Reassign — ${bundleLabel(a)}`, [err, field("New operator", sel)], [
+        el("button", { type: "button", onclick: async () => {
+            if (!chosen) { 
+                err.textContent = "Select an operator."; 
+                err.style.display = "block"; 
+                return; 
+            }
+            try { 
+                await apiPost(`/operators/assignments/${a.id}/reassign/`, { operator: Number(chosen) }); 
+                closeCrudModal(); 
+                notify.success("Reassigned."); 
+                await refreshAssignments(); 
+            } catch (e) { 
+                err.textContent = e.message; 
+                err.style.display = "block"; 
+            }
+        } }, "Reassign"),
+        el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  // ===================== REFRESH ASSIGNMENTS =====================
   async function refreshAssignments() {
     const wrap = document.getElementById("assignments-wrap");
     wrap.innerHTML = "Loading...";
     try {
-      const assignments = await fetchAll("/operators/assignments/");
-      wrap.innerHTML = "";
-      const body = el("div", {});
-      wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Assignments"), body]));
-      dataTable(body, {
-        columns: [
-          { label: "Product", value: a => `${a.product_code || ""} ${a.product_name || ""}`, render: a => (a.product_code ? `${a.product_code} — ${a.product_name}` : (a.product_name || "—")) },
-          { label: "Size", value: a => a.size_name || "", render: a => (a.size_name ? `Size ${a.size_name}${a.color_name ? " · " + a.color_name : ""}` : "—") },
-          { label: "Operator", key: "operator_name" },
-          { label: "Rate/pc", value: a => Number(a.rate_per_piece ?? 0), render: a => (a.rate_per_piece != null ? fmtMoney(a.rate_per_piece) : "—") },
-          { label: "Issued/Returned", value: a => Number(a.returned_quantity ?? a.issued_quantity ?? 0), render: a => `${a.issued_quantity ?? "—"} / ${a.returned_quantity ?? "—"}` },
-          { label: "Status", key: "status", render: a => badge(a.status) },
-          { label: "Shortage Review", value: a => a.shortage_reason_status, render: a => renderShortageCell(a) },
-          { label: "Actions", sortable: false, render: a => {
-              const actions = [];
-              if (a.status === "IN_PROGRESS") actions.push(el("button", { type: "button", onclick: () => returnAssignment(a) }, "Return"));
-              actions.push(el("button", { class: "secondary", type: "button", onclick: () => reassignAssignment(a) }, "Reassign"));
-              return el("div", { class: "form-inline" }, actions);
-            } },
-        ], rows: assignments, pageSize: 12, searchPlaceholder: "Search assignments — product, size, operator…",
-        emptyText: "No assignments yet.",
-      });
-    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+        const assignments = await fetchAll("/operators/assignments/");
+        ASSIGNMENTS = assignments;
+        
+        // Pre-populate from existing assignments
+        assignments.forEach(a => {
+            if (a.product && a.rate_per_piece != null) {
+                const key = String(a.product);
+                const rate = String(a.rate_per_piece);
+                productRateCache[key] = rate;
+                localStorage.setItem(`product_rate_${key}`, rate);
+            }
+        });
+        
+        // Load from localStorage
+        const allProductIds = MASTER.bundles.map(b => String(b.product)).filter(Boolean);
+        allProductIds.forEach(pid => {
+            const stored = localStorage.getItem(`product_rate_${pid}`);
+            if (stored !== null && !productRateCache[pid]) {
+                productRateCache[pid] = stored;
+            }
+        });
+        
+        wrap.innerHTML = "";
+        const body = el("div", {});
+        wrap.appendChild(el("div", { class: "card" }, [el("h3", {}, "Assignments"), body]));
+        dataTable(body, {
+            columns: [
+                { label: "Product", value: a => `${a.product_code || ""} ${a.product_name || ""}`, render: a => (a.product_code ? `${a.product_code} — ${a.product_name}` : (a.product_name || "—")) },
+                { label: "Size", value: a => a.size_name || "", render: a => (a.size_name ? `Size ${a.size_name}${a.color_name ? " · " + a.color_name : ""}` : "—") },
+                { label: "Operator", key: "operator_name" },
+                { label: "Rate/pc", value: a => Number(a.rate_per_piece ?? 0), render: a => (a.rate_per_piece != null ? fmtMoney(a.rate_per_piece) : "—") },
+                { label: "Issued/Returned", value: a => Number(a.returned_quantity ?? a.issued_quantity ?? 0), render: a => `${a.issued_quantity ?? "—"} / ${a.returned_quantity ?? "—"}` },
+                { label: "Status", key: "status", render: a => badge(a.status) },
+                { label: "Shortage Review", value: a => a.shortage_reason_status, render: a => renderShortageCell(a) },
+                { label: "Actions", sortable: false, render: a => {
+                    const actions = [];
+                    if (a.status === "IN_PROGRESS") actions.push(el("button", { type: "button", onclick: () => returnAssignment(a) }, "Return"));
+                    actions.push(el("button", { class: "secondary", type: "button", onclick: () => reassignAssignment(a) }, "Reassign"));
+                    return el("div", { class: "form-inline" }, actions);
+                } },
+            ], 
+            rows: assignments, 
+            pageSize: 12, 
+            searchPlaceholder: "Search assignments — product, size, operator…",
+            emptyText: "No assignments yet.",
+        });
+    } catch (e) { 
+        wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; 
+    }
   }
 
+  // ===================== INIT =====================
   (async function init() {
     await loadMaster();
     renderAssignForm();

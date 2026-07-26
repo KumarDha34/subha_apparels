@@ -188,7 +188,10 @@ class ProcessDispatchViewSet(viewsets.ModelViewSet):
 
     @classmethod
     def _available_pieces(cls, order_id):
-        return max(cls._accepted_pieces(order_id) - cls._approved_process_loss(order_id), 0)
+        # Floor pool = accepted minus pieces still OUT minus pieces lost at a
+        # process. Pieces sent but not yet received back are excluded, so they
+        # can't be double-sent to another department before they return.
+        return ProcessDispatch.available_to_send(order_id)
 
     @action(detail=False, methods=["get"])
     def order_summary(self, request):
@@ -211,7 +214,7 @@ class ProcessDispatchViewSet(viewsets.ModelViewSet):
             "order_number": order.order_number, "party_name": order.party.name if order.party_id else "",
             "order_type": order.order_type, "status": order.status, "items": items,
             "accepted_pieces": accepted, "approved_loss": approved_loss,
-            "available_pieces": max(accepted - approved_loss, 0), "by_department": by_department,
+            "available_pieces": self._available_pieces(order_id), "by_department": by_department,
         })
 
     @action(detail=True, methods=["post"])

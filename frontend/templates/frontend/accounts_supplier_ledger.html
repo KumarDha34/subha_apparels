@@ -1,0 +1,188 @@
+{% extends "frontend/base.html" %}
+{% block title %}Supplier Ledger - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Supplier Ledger &amp; Statement of Account</h2>
+  <p class="page-subtitle">What every supplier billed us, what we have paid, and what we still owe — a full running-balance ledger, ageing of overdue payables, and payment history for each supplier.</p>
+
+  <div class="grid grid-4" id="sl-kpi"></div>
+
+  <div class="card">
+    <h3>🏭 All Suppliers — payables at a glance</h3>
+    <p class="card-subtitle">Click <strong>View Statement</strong> for a supplier's complete running-balance ledger.</p>
+    <div id="suppliers-wrap" class="muted">Loading…</div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN", "ACCOUNTS"]);
+  renderShell("accounts-supplier-ledger", "Supplier Ledger");
+
+  const GREEN = "#1a7f4b", RED = "#b3261e", BLUE = "#0369a1", AMBER = "#b4690e";
+  const AGE_META = [
+    { key: "0-30", label: "0–30 days", color: "#1a7f4b" },
+    { key: "31-60", label: "31–60 days", color: "#b4690e" },
+    { key: "61-90", label: "61–90 days", color: "#e66239" },
+    { key: "90+", label: "90+ days", color: "#b3261e" },
+  ];
+
+  function kpiTile(icon, label, value, tone, sub) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? RED : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.8rem;padding:1.1rem 1.2rem;" }, [
+      el("div", { style: "font-size:1.7rem;line-height:1;" }, icon),
+      el("div", {}, [
+        el("div", { class: "value", style: `font-size:1.5rem;color:${c};line-height:1.1;` }, value),
+        el("div", { class: "label" }, label),
+        sub ? el("div", { class: "muted", style: "font-size:0.75rem;margin-top:0.15rem;" }, sub) : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  function money(v) { return fmtMoney(v); }
+
+  function ageingBars(ageing) {
+    const total = AGE_META.reduce((s, a) => s + Number(ageing[a.key] || 0), 0);
+    if (!total) return el("p", { class: "muted" }, "Nothing outstanding — fully settled. 🎉");
+    return el("div", {}, AGE_META.map(a => {
+      const v = Number(ageing[a.key] || 0);
+      const pct = total ? Math.round(v / total * 100) : 0;
+      return el("div", { style: "margin:.5rem 0;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;font-size:.85rem;margin-bottom:.25rem;" }, [
+          el("span", {}, a.label), el("strong", { style: v > 0 ? `color:${a.color};` : "color:#9aa0aa;font-weight:400;" }, money(v)) ]),
+        el("div", { style: "height:9px;border-radius:5px;background:#f0eeeb;overflow:hidden;" }, [
+          el("div", { style: `height:100%;width:${pct}%;background:${a.color};border-radius:5px;` }) ]),
+      ]);
+    }));
+  }
+
+  async function viewStatement(supplier) {
+    const closeBtn = el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close");
+    const printBtn = el("button", { class: "secondary", type: "button", onclick: () => printStatement() }, "🖨️ Print");
+    const body = el("div", { class: "muted" }, "Loading…");
+    showCrudModal(`📑 Statement — ${supplier.name}`, [body], [printBtn, closeBtn], { wide: true });
+
+    window.printStatement = () => {
+      const w = window.open("", "_blank");
+      w.document.write(`<html><head><title>Statement — ${supplier.name}</title>
+        <style>body{font-family:Arial,sans-serif;margin:24px;color:#1b2233}h1{font-size:20px;margin:0 0 4px}
+        table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}
+        th{background:#f5f5f5}.r{text-align:right}.muted{color:#666}</style></head><body>${body.dataset.print || body.innerHTML}</body></html>`);
+      w.document.close(); w.focus(); w.print();
+    };
+
+    try {
+      const s = await apiGet(`/accounts/supplier-statement/?supplier=${supplier.id}`);
+      body.innerHTML = "";
+      const closing = Number(s.summary.closing || 0);
+      const info = s.supplier;
+
+      body.appendChild(el("div", { class: "card", style: "margin-bottom:1rem;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;flex-wrap:wrap;gap:1rem;" }, [
+          el("div", {}, [
+            el("h3", { style: "margin:0 0 .3rem;" }, info.name),
+            el("div", { class: "muted", style: "font-size:.85rem;line-height:1.6;" }, [
+              el("div", {}, `Contact: ${info.contact_person}`),
+              el("div", {}, `📞 ${info.phone}   ✉️ ${info.email}`),
+              info.gst !== "—" ? el("div", {}, `GST: ${info.gst}`) : null,
+              info.payment_terms !== "—" ? el("div", {}, `Payment terms: ${info.payment_terms}`) : null,
+            ].filter(Boolean)),
+          ]),
+          el("div", { style: "text-align:right;" }, [
+            el("div", { class: "muted", style: "font-size:.75rem;" }, `As of ${s.as_of}`),
+            el("div", { style: `font-size:1.5rem;font-weight:800;color:${closing > 0 ? RED : GREEN};` }, money(closing)),
+            el("div", { class: "muted", style: "font-size:.8rem;" }, closing > 0 ? "Payable (we owe)" : "Settled"),
+          ]),
+        ]),
+      ]));
+
+      body.appendChild(el("div", { class: "grid grid-4", style: "margin-bottom:1rem;" }, [
+        kpiTile("🧾", "Total Billed", money(s.summary.total_debit), "info"),
+        kpiTile("💵", "Total Paid", money(s.summary.total_credit), "good"),
+        kpiTile(closing > 0 ? "⏳" : "✅", "Payable", money(closing), closing > 0 ? "bad" : "good"),
+        kpiTile("📊", "Settled", s.summary.total_debit ? Math.round(s.summary.total_credit / s.summary.total_debit * 100) + "%" : "—", "info"),
+      ]));
+
+      const ledgerCard = el("div", { class: "card" }, [ el("h4", { style: "margin:0 0 .5rem;" }, "Running-Balance Ledger"), buildLedger(s.entries) ]);
+      const sideCol = el("div", {}, [
+        el("div", { class: "card", style: "margin-bottom:1rem;" }, [ el("h4", { style: "margin:0 0 .5rem;" }, "Ageing of Outstanding"), ageingBars(s.ageing) ]),
+        el("div", { class: "card" }, [ el("h4", { style: "margin:0 0 .5rem;" }, "Payment History"), buildPayments(s.payments) ]),
+      ]);
+      body.appendChild(el("div", { style: "display:grid;grid-template-columns:1.6fr 1fr;gap:1rem;align-items:start;" }, [ledgerCard, sideCol]));
+
+      body.dataset.print = printableHTML(info, s);
+    } catch (e) {
+      body.innerHTML = `<p class="error-msg">Could not load statement: ${e.message}</p>`;
+    }
+  }
+
+  function buildLedger(entries) {
+    if (!entries.length) return el("p", { class: "muted" }, "No ledger entries yet.");
+    const head = el("tr", {}, ["Date", "Voucher", "Particulars", "Debit", "Credit", "Balance"].map((h, i) =>
+      el("th", { style: `padding:.4rem .5rem;border-bottom:2px solid #eee;font-size:.78rem;text-align:${i >= 3 ? "right" : "left"};` }, h)));
+    const rows = entries.map(e => el("tr", {}, [
+      el("td", { style: "padding:.35rem .5rem;font-size:.8rem;white-space:nowrap;" }, e.date),
+      el("td", { style: "padding:.35rem .5rem;font-size:.8rem;" }, e.voucher),
+      el("td", { style: "padding:.35rem .5rem;font-size:.8rem;" }, e.particulars),
+      el("td", { style: `padding:.35rem .5rem;font-size:.8rem;text-align:right;color:${e.debit ? RED : "#ccc"};` }, e.debit ? money(e.debit) : "—"),
+      el("td", { style: `padding:.35rem .5rem;font-size:.8rem;text-align:right;color:${e.credit ? GREEN : "#ccc"};` }, e.credit ? money(e.credit) : "—"),
+      el("td", { style: "padding:.35rem .5rem;font-size:.8rem;text-align:right;font-weight:700;" }, money(e.balance)),
+    ]));
+    return el("div", { style: "overflow-x:auto;" }, [ el("table", { style: "width:100%;border-collapse:collapse;" }, [ el("thead", {}, [head]), el("tbody", {}, rows) ]) ]);
+  }
+
+  function buildPayments(payments) {
+    if (!payments.length) return el("p", { class: "muted" }, "No payments made yet.");
+    return el("div", {}, payments.map(p => el("div", { style: "display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-bottom:1px solid #f2f0ed;" }, [
+      el("div", {}, [ el("div", { style: "font-weight:600;font-size:.85rem;" }, money(p.amount)),
+        el("div", { class: "muted", style: "font-size:.75rem;" }, `${p.date} · ${p.method} · ${p.reference}`) ]),
+      el("span", { style: `color:${GREEN};font-size:1.1rem;` }, "✓"),
+    ])));
+  }
+
+  function printableHTML(info, s) {
+    const rows = s.entries.map(e => `<tr><td>${e.date}</td><td>${e.voucher}</td><td>${e.particulars}</td>
+      <td class="r">${e.debit ? money(e.debit) : ""}</td><td class="r">${e.credit ? money(e.credit) : ""}</td><td class="r">${money(e.balance)}</td></tr>`).join("");
+    return `<h1>Supplier Statement of Account</h1><div class="muted">Subha Apparels · As of ${s.as_of}</div>
+      <p><strong>${info.name}</strong><br>${info.contact_person} · ${info.phone} · ${info.email}</p>
+      <table><thead><tr><th>Date</th><th>Voucher</th><th>Particulars</th><th class="r">Debit</th><th class="r">Credit</th><th class="r">Balance</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+      <p><strong>Total Billed:</strong> ${money(s.summary.total_debit)} &nbsp; <strong>Total Paid:</strong> ${money(s.summary.total_credit)} &nbsp; <strong>Payable:</strong> ${money(s.summary.closing)}</p>`;
+  }
+
+  async function refresh() {
+    const wrap = document.getElementById("suppliers-wrap");
+    const kpiBox = document.getElementById("sl-kpi");
+    wrap.textContent = "Loading…";
+    try {
+      const data = await apiGet("/accounts/supplier-statement/");
+      const suppliers = data.suppliers || [];
+      const tBilled = suppliers.reduce((s, p) => s + p.billed, 0);
+      const tPaid = suppliers.reduce((s, p) => s + p.paid, 0);
+      const tPay = suppliers.reduce((s, p) => s + p.payable, 0);
+      const owing = suppliers.filter(p => p.payable > 0).length;
+      kpiBox.innerHTML = "";
+      kpiBox.append(
+        kpiTile("🧾", "Total Billed", money(tBilled), "info"),
+        kpiTile("💵", "Total Paid", money(tPaid), "good"),
+        kpiTile("⏳", "Payable", money(tPay), tPay > 0 ? "bad" : "good", `${owing} supplier${owing === 1 ? "" : "s"} owing`),
+        kpiTile("📊", "Settled", tBilled ? Math.round(tPaid / tBilled * 100) + "%" : "—", "info"));
+
+      wrap.innerHTML = "";
+      dataTable(wrap, {
+        columns: [
+          { label: "Supplier", key: "name" },
+          { label: "Bills", num: true, value: p => p.invoices, render: p => String(p.invoices) },
+          { label: "Billed", num: true, value: p => p.billed, render: p => money(p.billed) },
+          { label: "Paid", num: true, value: p => p.paid, render: p => el("span", { style: `color:${GREEN};` }, money(p.paid)) },
+          { label: "Payable", num: true, value: p => p.payable,
+            render: p => el("strong", { style: `color:${p.payable > 0 ? RED : GREEN};` }, money(p.payable)) },
+          { label: "", sortable: false, render: p => el("button", { class: "secondary", type: "button", onclick: () => viewStatement(p) }, "View Statement") },
+        ], rows: suppliers, pageSize: 12, initialSort: { key: "payable", dir: "desc" },
+        searchPlaceholder: "Search suppliers…", emptyText: "No suppliers with bills yet.",
+      });
+    } catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  refresh();
+</script>
+{% endblock %}
