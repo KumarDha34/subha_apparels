@@ -1,66 +1,144 @@
 {% extends "frontend/base.html" %}
-{% block title %}Alterations - GMS{% endblock %}
+{% block title %}Alterations — Rework{% endblock %}
 {% block content %}
-  <h2 class="page-title">Alterations — Reprocess</h2>
-  <p class="page-subtitle">Pieces Finishing sent for alteration come back here to Production. Rework them, then record how many passed re-inspection and how many had to be scrapped. The finishing QC results update automatically.</p>
-  <div id="wrap"></div>
+  <h2 class="page-title">Alterations — Rework Tasks</h2>
+  <p class="page-subtitle">Pieces Finishing QC sent for alteration land here as rework tasks. Allocate the altered pieces (tied to their order, product, colour & size) to an operator at a rate per piece; when the operator finishes and returns them, mark the task complete — the pieces then go back to Finishing for a second QC.</p>
+
+  <div class="grid grid-4" id="alt-kpi"></div>
+  <div id="allocate-wrap"></div>
+  <div id="progress-wrap"></div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-  Auth.guardPage(["PRODUCTION_SUPERVISOR"]);
+  Auth.guardPage(["ADMIN", "PRODUCTION_SUPERVISOR"]);
   renderShell("production-alterations", "Alterations");
 
-  function openRework(qc) {
-    const pending = qc.alteration_pending;
-    const passed = numberInput("", () => {}, { min: "0", max: String(pending), step: "1", placeholder: "reworked & now good" });
-    const failed = numberInput("", () => {}, { min: "0", max: String(pending), step: "1", placeholder: "scrapped" });
+  const GREEN = "#1a7f4b", RED = "#b3261e", AMBER = "#b4690e", BLUE = "#0369a1";
+  let OPERATORS = [];
+
+  function kpiTile(icon, label, value, tone) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? RED : tone === "warn" ? AMBER : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.7rem;padding:1rem 1.1rem;" }, [
+      el("div", { style: "font-size:1.5rem;" }, icon),
+      el("div", {}, [el("div", { class: "value", style: `font-size:1.35rem;color:${c};` }, String(value)), el("div", { class: "label" }, label)]),
+    ]);
+  }
+
+  // Allocate altered pieces on a QC row to an operator at a rate/piece.
+  function openAllocate(qc) {
+    const max = qc.allocatable_rework;
+    const opSel = selectEl({}, OPERATORS.map(o => ({ value: o.id, label: o.name })), "", "Select operator");
+    const qtyInput = numberInput(String(max), () => {}, { min: "1", max: String(max), step: "1" });
+    const rateInput = numberInput("", () => {}, { min: "0", step: "0.01", placeholder: "e.g. 20.00 per piece" });
     const err = el("div", { class: "error-msg", style: "display:none;" });
-    showCrudModal(`Rework — ${qc.order_number} · ${qc.color_name || "—"}/${qc.size_name || "—"}`, [
-      el("p", { class: "muted", style: "margin-top:-0.4rem;" }, `${pending} altered piece(s) pending rework. Reason: ${qc.alter_reason || "—"}.`),
+    showCrudModal(`🧵 Allocate Rework — ${qc.order_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        `${qc.product_summary || "—"} · ${qc.color_name || "—"}/${qc.size_name || "—"} — ${max} altered piece(s) to rework. Reason: ${qc.alter_reason || "—"}.`),
       err,
-      field("Reworked — passed", passed),
-      field("Scrapped — failed", failed),
+      el("div", { class: "form-inline" }, [field("Operator", opSel), field("Pieces", qtyInput), field("Rate / Piece (Rs.)", rateInput)]),
     ], [
       el("button", { type: "button", onclick: async () => {
         err.style.display = "none";
-        const p = Number(passed.value || 0), f = Number(failed.value || 0);
-        if (p < 0 || f < 0 || (p + f) === 0) { err.textContent = "Enter how many passed and/or were scrapped."; err.style.display = "block"; return; }
-        if (p + f > pending) { err.textContent = `Only ${pending} piece(s) are pending — passed + scrapped can't exceed that.`; err.style.display = "block"; return; }
+        const operator = Number(opSel.value), qty = Number(qtyInput.value), rate = Number(rateInput.value);
+        if (!operator) { err.textContent = "Select an operator."; err.style.display = "block"; return; }
+        if (!(qty >= 1) || qty > max) { err.textContent = `Pieces must be between 1 and ${max}.`; err.style.display = "block"; return; }
+        if (!(rate >= 0)) { err.textContent = "Enter a valid rate per piece."; err.style.display = "block"; return; }
         try {
-          await apiPost(`/finishing/quality-checks/${qc.id}/record_rework/`, { passed: p, failed: f });
-          closeCrudModal(); notify.success(`Rework recorded: ${p} passed, ${f} scrapped.`); await load();
+          await apiPost("/finishing/rework-assignments/", { qc: qc.id, operator, quantity: qty, rate_per_piece: rate });
+          closeCrudModal(); notify.success(`Allocated ${qty} piece(s) to rework.`); await load();
         } catch (e) { err.textContent = e.message; err.style.display = "block"; }
-      } }, "Record Rework"),
+      } }, "Allocate"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  // Operator finished the rework and returned the pieces -> back to Finishing for 2nd QC.
+  function openComplete(ra) {
+    const qtyInput = numberInput(String(ra.quantity), () => {}, { min: "1", max: String(ra.quantity), step: "1" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`✅ Complete Rework — ${ra.order_number}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        `${ra.operator_name} · ${ra.color_name || "—"}/${ra.size_name || "—"} · ${ra.quantity} piece(s) @ ${fmtMoney(ra.rate_per_piece)}/pc. Enter how many were reworked and returned — they go back to Finishing for a second QC.`),
+      err, field("Pieces reworked & returned", qtyInput),
+    ], [
+      el("button", { type: "button", onclick: async () => {
+        err.style.display = "none";
+        const qty = Number(qtyInput.value);
+        if (!(qty >= 1) || qty > ra.quantity) { err.textContent = `Enter between 1 and ${ra.quantity}.`; err.style.display = "block"; return; }
+        try {
+          await apiPost(`/finishing/rework-assignments/${ra.id}/complete/`, { returned_quantity: qty });
+          closeCrudModal(); notify.success(`${qty} piece(s) returned to Finishing for second QC.`); await load();
+        } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Mark Complete"),
       el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
     ]);
   }
 
   async function load() {
-    const wrap = document.getElementById("wrap");
-    wrap.innerHTML = "Loading…";
-    let rows;
-    try { rows = await fetchAll("/finishing/quality-checks/"); }
-    catch (e) { wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; return; }
-    const pending = rows.filter(r => (r.alteration_pending || 0) > 0);
-    wrap.innerHTML = "";
-    const body = el("div", {});
-    wrap.appendChild(el("div", { class: "card" }, [
-      el("h3", {}, `🧵 Pieces to Rework (${pending.length})`), body,
-    ]));
-    if (!pending.length) { body.appendChild(el("p", { class: "muted" }, "Nothing to rework — no altered pieces are pending.")); return; }
-    dataTable(body, {
+    const [qcs, reworks] = await Promise.all([
+      fetchAll("/finishing/quality-checks/").catch(() => []),
+      fetchAll("/finishing/rework-assignments/").catch(() => []),
+    ]);
+    const toAllocate = qcs.filter(q => (q.allocatable_rework || 0) > 0);
+    const inProgress = reworks.filter(r => r.status === "ALLOCATED");
+    const completed = reworks.filter(r => r.status === "COMPLETED");
+
+    // KPIs
+    const kpi = document.getElementById("alt-kpi"); kpi.innerHTML = "";
+    const pendingPieces = toAllocate.reduce((s, q) => s + Number(q.allocatable_rework || 0), 0);
+    const inProgPieces = inProgress.reduce((s, r) => s + Number(r.quantity || 0), 0);
+    const donePieces = completed.reduce((s, r) => s + Number(r.returned_quantity || 0), 0);
+    kpi.append(
+      kpiTile("🧵", "Awaiting Allocation", pendingPieces, pendingPieces ? "warn" : "good"),
+      kpiTile("🛠️", "Being Reworked", inProgPieces, "info"),
+      kpiTile("↩️", "Returned (2nd QC due)", donePieces, "good"),
+      kpiTile("👷", "Active Rework Tasks", inProgress.length, "info"));
+
+    // Section A — allocate
+    const aWrap = document.getElementById("allocate-wrap"); aWrap.innerHTML = "";
+    const aBody = el("div", {});
+    aWrap.appendChild(el("div", { class: "card" }, [el("h3", {}, `🧵 Altered Pieces to Allocate (${toAllocate.length})`), aBody]));
+    if (!toAllocate.length) aBody.appendChild(el("p", { class: "muted" }, "Nothing to allocate — no altered pieces are waiting."));
+    else dataTable(aBody, {
       columns: [
         { key: "order_number", label: "Order #" },
-        { label: "Colour", value: r => r.color_name || "", render: r => r.color_name || "—" },
-        { label: "Size", value: r => r.size_name || "", render: r => r.size_name || "—" },
-        { label: "Altered", value: r => Number(r.quantity_altered || 0), render: r => String(r.quantity_altered || 0) },
-        { label: "Pending", value: r => Number(r.alteration_pending || 0), render: r => badge(String(r.alteration_pending)) },
-        { label: "Reason", sortable: false, render: r => r.alter_reason || "—" },
-        { label: "Action", sortable: false, render: r => el("button", { type: "button", onclick: () => openRework(r) }, "Record Rework") },
-      ], rows: pending, pageSize: 12, searchPlaceholder: "Search — order, colour, size…", emptyText: "Nothing to rework.",
+        { label: "Product", sortable: false, render: q => q.product_summary || "—" },
+        { label: "Colour", value: q => q.color_name || "", render: q => q.color_name || "—" },
+        { label: "Size", value: q => q.size_name || "", render: q => q.size_name || "—" },
+        { label: "Altered", num: true, value: q => Number(q.quantity_altered || 0), render: q => String(q.quantity_altered || 0) },
+        { label: "To Allocate", num: true, value: q => Number(q.allocatable_rework || 0), render: q => badge(String(q.allocatable_rework)) },
+        { label: "Reason", sortable: false, render: q => q.alter_reason || "—" },
+        { label: "Action", sortable: false, render: q => el("button", { type: "button", onclick: () => openAllocate(q) }, "Allocate to Operator") },
+      ], rows: toAllocate, pageSize: 10, searchPlaceholder: "Search — order, product, colour…", emptyText: "Nothing to allocate.",
+    });
+
+    // Section B — in progress + completed
+    const pWrap = document.getElementById("progress-wrap"); pWrap.innerHTML = "";
+    const pBody = el("div", {});
+    pWrap.appendChild(el("div", { class: "card" }, [el("h3", {}, `🛠️ Rework Tasks (${inProgress.length} active · ${completed.length} returned)`), pBody]));
+    const allTasks = [...inProgress, ...completed];
+    if (!allTasks.length) pBody.appendChild(el("p", { class: "muted" }, "No rework tasks yet."));
+    else dataTable(pBody, {
+      columns: [
+        { key: "order_number", label: "Order #" },
+        { label: "Operator", key: "operator_name" },
+        { label: "Colour/Size", sortable: false, render: r => `${r.color_name || "—"}/${r.size_name || "—"}` },
+        { label: "Pieces", num: true, value: r => Number(r.quantity || 0), render: r => String(r.quantity || 0) },
+        { label: "Rate", num: true, value: r => Number(r.rate_per_piece || 0), render: r => fmtMoney(r.rate_per_piece) },
+        { label: "Returned", num: true, value: r => Number(r.returned_quantity || 0), render: r => (r.returned_quantity != null ? String(r.returned_quantity) : "—") },
+        { label: "Earned", num: true, value: r => Number(r.earned_amount || 0), render: r => fmtMoney(r.earned_amount) },
+        { label: "Status", value: r => r.status, render: r => badge(r.status) },
+        { label: "Action", sortable: false, render: r => (r.status === "ALLOCATED"
+            ? el("button", { type: "button", onclick: () => openComplete(r) }, "Mark Complete")
+            : el("span", { class: "badge success" }, "→ 2nd QC")) },
+      ], rows: allTasks, pageSize: 10, initialSort: { key: "status", dir: "asc" }, searchPlaceholder: "Search — order, operator…", emptyText: "No rework tasks.",
     });
   }
-  load();
+
+  (async function init() {
+    OPERATORS = await fetchAll("/operators/operators/?is_active=true").catch(() => []);
+    await load();
+  })();
 </script>
 {% endblock %}

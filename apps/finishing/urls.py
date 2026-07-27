@@ -1,11 +1,12 @@
 from rest_framework.routers import DefaultRouter
 from .views import (
     FinishingQualityCheckViewSet, PackingViewSet, DispatchViewSet,
-    FinishingOperationViewSet, FinishingReceiptViewSet,
+    FinishingOperationViewSet, FinishingReceiptViewSet, ReworkAssignmentViewSet,
 )
 
 router = DefaultRouter()
 router.register("quality-checks", FinishingQualityCheckViewSet, basename="finishing-qc")
+router.register("rework-assignments", ReworkAssignmentViewSet, basename="rework-assignment")
 router.register("packing", PackingViewSet, basename="packing")
 router.register("dispatch", DispatchViewSet, basename="dispatch")
 router.register("operations", FinishingOperationViewSet, basename="finishing-operation")

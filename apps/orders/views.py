@@ -67,6 +67,30 @@ def compute_order_loss(order):
     final_qc_rejected = FinishingQualityCheck.objects.filter(order=order).aggregate(s=Sum("quantity_rejected"))["s"] or 0
     finishing_lost = process_loss + final_qc_rejected
 
+    # ---- Final-QC audit, per colour + size: the full rework journey ----
+    # checked -> passed(1st) / altered / rejected ; altered -> reworked_passed
+    # / reworked_failed ; final_good = passed + reworked_passed.
+    qc_breakdown = []
+    qc_totals = {"checked": 0, "passed": 0, "altered": 0, "rejected": 0,
+                 "reworked_passed": 0, "reworked_failed": 0, "final_good": 0}
+    for qc in (FinishingQualityCheck.objects.filter(order=order)
+               .select_related("color", "size").order_by("color__name", "size__name")):
+        row = {
+            "color": qc.color.name if qc.color_id else "—",
+            "size": qc.size.name if qc.size_id else "—",
+            "checked": qc.quantity_checked,
+            "passed": qc.quantity_passed,
+            "altered": qc.quantity_altered,
+            "rejected": qc.quantity_rejected,
+            "reworked_passed": qc.quantity_reworked_passed,
+            "reworked_failed": qc.quantity_reworked_failed,
+            "pending_rework": qc.alteration_pending,
+            "final_good": qc.final_good,
+        }
+        qc_breakdown.append(row)
+        for k in qc_totals:
+            qc_totals[k] += row.get(k, 0)
+
     dispatch = Dispatch.objects.filter(order=order).first()
     dispatched = dispatch.quantity_dispatched if (dispatch and dispatch.quantity_dispatched) else None
     good_pieces = dispatched if dispatched is not None else max(prod_returned - finishing_lost, 0)
@@ -86,6 +110,7 @@ def compute_order_loss(order):
         "finishing": {
             "received": received, "by_operation": by_operation,
             "final_qc_rejected": final_qc_rejected, "lost": finishing_lost,
+            "qc_breakdown": qc_breakdown, "qc_totals": qc_totals,
         },
         "total_lost": total_lost, "good_pieces": good_pieces,
     }

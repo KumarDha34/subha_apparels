@@ -416,6 +416,15 @@ class OrderPnLView(APIView):
             # Operators are paid the assignment's rate_per_piece x pieces returned.
             labor_cost += assignment_labor_cost(assignment)
 
+        # Rework labour: altered pieces sent back to Production and reworked by
+        # an operator are paid the rework rate/piece -- an additional labour cost
+        # on this order (returned pieces x rate).
+        from apps.finishing.models import ReworkAssignment
+        rework_cost = Decimal("0")
+        for ra in ReworkAssignment.objects.filter(qc__order=order, status=ReworkAssignment.Status.COMPLETED):
+            rework_cost += (ra.returned_quantity or 0) * (ra.rate_per_piece or Decimal("0"))
+        labor_cost += rework_cost
+
         # Processing cost, broken out per department (Washing/Printing/Embroidery/Finishing).
         from collections import defaultdict
         process_costs = defaultdict(Decimal)

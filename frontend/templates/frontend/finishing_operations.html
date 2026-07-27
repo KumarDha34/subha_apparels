@@ -5,6 +5,7 @@
   <p class="page-subtitle">Pick an order received from Production, then record QC for each colour + size: passed, failed (with reason), altered (with reason). Results show the full breakdown.</p>
 
   <div id="qc-form"></div>
+  <div id="second-qc"></div>
   <div id="qc-results"></div>
 {% endblock %}
 
@@ -140,12 +141,16 @@
       const passed = list.reduce((s, r) => s + (r.quantity_passed || 0), 0);
       const failed = list.reduce((s, r) => s + (r.quantity_rejected || 0), 0);
       const altered = list.reduce((s, r) => s + (r.quantity_altered || 0), 0);
+      const reworkedOk = list.reduce((s, r) => s + (r.quantity_reworked_passed || 0), 0);
+      const finalGood = list.reduce((s, r) => s + (r.final_good || 0), 0);
 
       const grid = el("table", { class: "data-table" });
-      grid.appendChild(el("thead", {}, el("tr", {}, ["Colour", "Size", "Passed", "Failed", "Altered"].map(h => el("th", {}, h)))));
+      grid.appendChild(el("thead", {}, el("tr", {}, ["Colour", "Size", "Passed", "Failed", "Altered", "Reworked ✓", "Final Good"].map(h => el("th", {}, h)))));
       grid.appendChild(el("tbody", {}, list.map(r => el("tr", {}, [
         el("td", {}, r.color_name || "—"), el("td", {}, r.size_name || "—"),
         el("td", {}, String(r.quantity_passed || 0)), el("td", {}, String(r.quantity_rejected || 0)), el("td", {}, String(r.quantity_altered || 0)),
+        el("td", { style: "color:#1a7f4b;font-weight:600;" }, String(r.quantity_reworked_passed || 0)),
+        el("td", { style: "font-weight:700;" }, String(r.final_good || 0)),
       ]))));
 
       const fails = list.filter(r => (r.quantity_rejected || 0) > 0);
@@ -163,7 +168,8 @@
       wrap.appendChild(el("div", { class: "card" }, [
         el("h3", {}, `QC Results — ${orderNo}`),
         el("div", { class: "grid grid-4" }, [
-          ["Total Checked", checked], ["Passed", passed], ["Failed", failed], ["Altered", altered],
+          ["Total Checked", checked], ["Passed (1st)", passed], ["Failed", failed],
+          ["Altered", altered], ["Reworked ✓", reworkedOk], ["Final Good (dispatchable)", finalGood],
         ].map(([l, v]) => el("div", { class: "card stat" }, [el("div", { class: "value" }, String(v)), el("div", { class: "label" }, l)]))),
         el("div", { class: "section-title" }, "Breakdown by colour & size"), grid,
         ...failNodes,
@@ -171,9 +177,61 @@
     }
   }
 
+  // Second QC: reworked pieces returned from Production, awaiting re-inspection.
+  function openSecondQC(qc) {
+    const pending = qc.awaiting_second_qc;
+    const passed = numberInput(String(pending), () => {}, { min: "0", max: String(pending), step: "1" });
+    const failed = numberInput("0", () => {}, { min: "0", max: String(pending), step: "1" });
+    const err = el("div", { class: "error-msg", style: "display:none;" });
+    showCrudModal(`🔁 Second QC — ${qc.order_number} · ${qc.color_name || "—"}/${qc.size_name || "—"}`, [
+      el("p", { class: "muted", style: "margin-top:-0.4rem;" },
+        `${pending} reworked piece(s) came back from Production. Re-inspect: pieces that pass are added to the good/dispatchable count; pieces that fail are scrapped (permanently rejected).`),
+      err,
+      field("Passed re-inspection (→ good)", passed),
+      field("Failed (→ scrapped)", failed),
+    ], [
+      el("button", { type: "button", onclick: async () => {
+        err.style.display = "none";
+        const p = Number(passed.value || 0), f = Number(failed.value || 0);
+        if (p + f === 0) { err.textContent = "Enter how many passed and/or failed."; err.style.display = "block"; return; }
+        if (p + f > pending) { err.textContent = `Only ${pending} piece(s) are pending second QC.`; err.style.display = "block"; return; }
+        try {
+          await apiPost(`/finishing/quality-checks/${qc.id}/record_rework/`, { passed: p, failed: f });
+          closeCrudModal(); notify.success(`Second QC recorded: ${p} passed, ${f} scrapped.`); await loadSecondQC(); await loadResults();
+        } catch (e) { err.textContent = e.message; err.style.display = "block"; }
+      } }, "Record Second QC"),
+      el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Cancel"),
+    ]);
+  }
+
+  async function loadSecondQC() {
+    const wrap = document.getElementById("second-qc"); wrap.innerHTML = "";
+    let rows;
+    try { rows = await fetchAll("/finishing/quality-checks/"); } catch (e) { return; }
+    const pending = rows.filter(r => (r.awaiting_second_qc || 0) > 0);
+    if (!pending.length) return;  // only show the section when there's rework to re-inspect
+    const body = el("div", {});
+    wrap.appendChild(el("div", { class: "card", style: "border-left:4px solid #b4690e;" }, [
+      el("h3", {}, `🔁 Second QC — Reworked Pieces Awaiting Re-inspection (${pending.length})`),
+      el("p", { class: "card-subtitle" }, "Pieces reworked by Production and returned to Finishing. Re-inspect them — passes join the dispatchable good count."),
+      body,
+    ]));
+    dataTable(body, {
+      columns: [
+        { key: "order_number", label: "Order #" },
+        { label: "Colour", value: r => r.color_name || "", render: r => r.color_name || "—" },
+        { label: "Size", value: r => r.size_name || "", render: r => r.size_name || "—" },
+        { label: "Reworked & Returned", num: true, value: r => Number(r.returned_from_rework || 0), render: r => String(r.returned_from_rework || 0) },
+        { label: "Awaiting 2nd QC", num: true, value: r => Number(r.awaiting_second_qc || 0), render: r => badge(String(r.awaiting_second_qc)) },
+        { label: "Action", sortable: false, render: r => el("button", { type: "button", onclick: () => openSecondQC(r) }, "Re-inspect") },
+      ], rows: pending, pageSize: 10, searchPlaceholder: "Search — order, colour, size…", emptyText: "Nothing awaiting second QC.",
+    });
+  }
+
   (async function init() {
     await loadReceivedOrders();
     renderForm();
+    await loadSecondQC();
     await loadResults();
   })();
 </script>

@@ -41,6 +41,10 @@ def _order_cost(order):
         status__in=[BundleAssignment.Status.COMPLETED, BundleAssignment.Status.QUALITY_CHECKED],
     ):
         labor += assignment_labor_cost(a)
+    # Rework labour (altered pieces reworked by an operator) adds to labour.
+    from apps.finishing.models import ReworkAssignment
+    for ra in ReworkAssignment.objects.filter(qc__order=order, status=ReworkAssignment.Status.COMPLETED):
+        labor += (ra.returned_quantity or 0) * (ra.rate_per_piece or Decimal("0"))
     processing = sum((pd.cost for pd in ProcessDispatch.objects.filter(order=order) if pd.cost), Decimal("0"))
     disp = Dispatch.objects.filter(order=order).first()
     transport = disp.transport_cost if disp and disp.transport_cost else Decimal("0")

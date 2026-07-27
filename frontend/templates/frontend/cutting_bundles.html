@@ -2,10 +2,15 @@
 {% block title %}Bundles - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Bundles</h2>
-  <p class="page-subtitle">Group recorded cut pieces into bundles, ready to send to Production.</p>
+  <p class="page-subtitle">View and manage cut bundles — filter by product, select and combine bundles of the same color &amp; size.</p>
 
-  <div id="create-wrap"></div>
+  <!-- Product Filter -->
+  <div id="filter-wrap"></div>
+
+  <!-- Bundles Display -->
   <div id="bundles-wrap"></div>
+
+  <!-- Cutting Pieces Panel -->
   <div id="pieces-panel"></div>
 {% endblock %}
 
@@ -14,17 +19,15 @@
   Auth.guardPage(["CUTTING_SUPERVISOR"]);
   renderShell("cutting-bundles", "Bundles");
 
-  let CUTTING_ORDERS = [];
-  const createState = { cutting_order: "", combo: "", quantity: "" };
-  const selected = new Set();   // bundle ids ticked for combining
+  // ==================== STATE ====================
+  const selected = new Set();        // bundle ids ticked for combining
+  let selectedProduct = "";          // current product filter
+  let allBundles = [];              // cache all bundles
+  let refreshTimer = null;           // auto-refresh timer
 
-  // ✅ combinable function — a bundle can be merged only while it is still on
-  // the cutting floor: just CREATED and NOT yet sent to Production. Once it has
-  // been sent/received/assigned to an operator, merging would break piece-rate
-  // pay and traceability, so it's locked.
+  // ==================== COMBINABLE LOGIC ====================
   const combinable = b => !b.sent_to_production_at && b.status === "CREATED";
 
-  // Same cutting order + colour + size, 2 or more, all still combinable.
   function combinableGroups(bundles) {
     const groups = {};
     bundles.filter(combinable).forEach(b => {
@@ -34,7 +37,6 @@
     return Object.values(groups).filter(g => g.length >= 2);
   }
 
-  // Keep the two header buttons' labels + enabled state in sync with the ticks.
   function updateCombineButtons(groupCount) {
     const combineBtn = document.getElementById("combine-selected-btn");
     const mergeBtn = document.getElementById("merge-all-btn");
@@ -48,92 +50,154 @@
     }
   }
 
-  /** Available-to-bundle quantity for one (color,size) combo */
-  async function computeAvailability(cuttingOrder) {
-    const [pieces, bundles, components] = await Promise.all([
-      fetchAll(`/cutting/pieces/?cutting_order=${cuttingOrder.id}`),
-      fetchAll(`/cutting/bundles/?cutting_order=${cuttingOrder.id}`),
-      cuttingOrder.product ? fetchAll(`/master/product-components/?product=${cuttingOrder.product}&is_active=true`) : Promise.resolve([]),
-    ]);
-    const bySizeColor = new Map();
-    const pieceKey = (p) => `${p.color}:${p.size}`;
-    const alreadyBundled = (color, size) => bundles.filter(b => b.color === color && b.size === size).reduce((s, b) => s + b.quantity, 0);
-
-    const combos = new Set(pieces.map(pieceKey));
-    combos.forEach(key => {
-      const [color, size] = key.split(":").map(Number);
-      const already = alreadyBundled(color, size);
-      let available;
-      if (components.length) {
-        available = Math.min(...components.map(comp => {
-          const p = pieces.find(pp => pp.color === color && pp.size === size && pp.component === comp.id);
-          return (p ? p.quantity : 0) - already;
-        }));
-      } else {
-        const p = pieces.find(pp => pp.color === color && pp.size === size && pp.component == null);
-        available = (p ? p.quantity : 0) - already;
+  // ==================== PRODUCT FILTER ====================
+  function getProductOptions(bundles) {
+    const products = new Map();
+    bundles.forEach(b => {
+      if (b.product && b.product_name) {
+        const key = String(b.product);
+        if (!products.has(key)) {
+          products.set(key, {
+            id: b.product,
+            name: b.product_name,
+            code: b.product_code || "",
+            cutting_order: b.cutting_order
+          });
+        }
       }
-      const sample = pieces.find(pp => pp.color === color && pp.size === size);
-      const label = sample ? `${sample.color_name} / ${sample.size_name}` : `Color ${color} / Size ${size}`;
-      bySizeColor.set(key, { color, size, label, available: Math.max(available, 0) });
     });
-    return bySizeColor;
+    return [...products.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  async function renderCreateForm() {
-    const wrap = document.getElementById("create-wrap");
-    wrap.innerHTML = "";
-    const errorBox = el("div", { class: "error-msg", style: "display:none;" });
+  function populateProductFilter(bundles) {
+    const wrap = document.getElementById("filter-wrap");
+    if (!wrap) return;
 
-    const orderSelect = selectEl({ onchange: async e => { createState.cutting_order = e.target.value; createState.combo = ""; await renderCreateForm(); } },
-      CUTTING_ORDERS.map(c => ({ value: c.id, label: `${c.cutting_number} — ${c.fabric_type_name}/${c.color_name}` })), createState.cutting_order, "Select cutting order");
-
-    let comboField = null, availabilityHint = null;
-    const cuttingOrder = CUTTING_ORDERS.find(c => String(c.id) === String(createState.cutting_order));
-    if (cuttingOrder) {
-      const availability = await computeAvailability(cuttingOrder);
-      const options = [...availability.values()].map(a => ({ value: `${a.color}:${a.size}`, label: `${a.label} — available: ${a.available}` }));
-      comboField = field("Color / Size", selectEl({ onchange: e => { createState.combo = e.target.value; renderCreateForm(); } }, options, createState.combo, "Select color/size"));
-      const chosen = availability.get(createState.combo);
-      if (chosen) availabilityHint = el("p", { class: "muted" }, `Available to bundle: ${chosen.available}`);
+    const options = getProductOptions(bundles);
+    
+    if (options.length === 0) {
+      wrap.innerHTML = `
+        <div class="card" style="padding:0.8rem 1.2rem;margin-bottom:1rem;background:var(--brand-soft);">
+          <p class="muted" style="margin:0;font-size:0.9rem;">🔍 No bundles available yet. Create bundles from Cutting Orders.</p>
+        </div>
+      `;
+      return;
     }
 
-    const qtyField = field("Quantity", numberInput(createState.quantity, v => createState.quantity = v, { min: "1", step: "1" }));
-    const submitBtn = el("button", { type: "button", onclick: submitBundle }, "Create Bundle");
+    // Build filter UI
+    wrap.innerHTML = `
+      <div class="card" style="padding:0.8rem 1.2rem;margin-bottom:1rem;">
+        <div class="filter-container" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;">
+          <div style="min-width:280px;flex:1;">
+            <label style="font-size:0.78rem;font-weight:600;color:var(--text-muted);display:block;margin-bottom:0.2rem;">🎯 Filter by Product</label>
+            <select id="product-filter" style="width:100%;padding:0.5rem 0.7rem;border:1px solid var(--border-strong);border-radius:10px;font-size:0.86rem;background:var(--card-bg);">
+              <option value="">📦 All Products</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:flex-end;gap:0.5rem;flex-wrap:wrap;padding-bottom:0.1rem;">
+            <button id="apply-filter-btn" class="secondary" type="button" onclick="applyProductFilter()">Apply Filter</button>
+            <button id="clear-filter-btn" class="secondary" type="button" onclick="clearProductFilter()">Clear</button>
+            <span id="filter-result" style="font-size:0.8rem;color:var(--text-muted);padding:0.3rem 0;min-width:150px;"></span>
+          </div>
+        </div>
+      </div>
+    `;
 
-    wrap.appendChild(el("div", { class: "card" }, [
-      el("h3", {}, "Create Bundle"),
-      errorBox,
-      el("div", { class: "form-inline" }, [field("Cutting Order", orderSelect), comboField, qtyField].filter(Boolean)),
-      availabilityHint,
-      el("div", { class: "form-inline", style: "margin-top:0.5rem;" }, [submitBtn]),
-    ]));
-    wrap._errorBox = errorBox;
+    const select = document.getElementById("product-filter");
+    if (select) {
+      options.forEach(p => {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = `${p.code ? p.code + " — " : ""}${p.name}`;
+        if (String(p.id) === String(selectedProduct)) {
+          opt.selected = true;
+        }
+        select.appendChild(opt);
+      });
+
+      // Auto-apply filter when selection changes
+      select.onchange = function() {
+        applyProductFilter();
+      };
+    }
   }
 
-  async function submitBundle() {
-    const errorBox = document.getElementById("create-wrap")._errorBox;
-    errorBox.style.display = "none";
-    if (!createState.cutting_order || !createState.combo || !createState.quantity) {
-      errorBox.textContent = "Select a cutting order, color/size, and quantity."; errorBox.style.display = "block"; return;
+  function applyProductFilter() {
+    const select = document.getElementById("product-filter");
+    if (select) {
+      selectedProduct = select.value;
+      refreshBundles();
     }
-    const [color, size] = createState.combo.split(":").map(Number);
+  }
+
+  function clearProductFilter() {
+    selectedProduct = "";
+    const select = document.getElementById("product-filter");
+    if (select) select.value = "";
+    refreshBundles();
+  }
+
+  function filterBundlesByProduct(bundles) {
+    if (!selectedProduct) return bundles;
+    return bundles.filter(b => String(b.product) === String(selectedProduct));
+  }
+
+  function getProductName(productId) {
+    const select = document.getElementById("product-filter");
+    if (select) {
+      const option = select.querySelector(`option[value="${productId}"]`);
+      if (option) return option.textContent;
+    }
+    return "Selected Product";
+  }
+
+  // ==================== AUTO-REFRESH ====================
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    refreshTimer = setInterval(() => {
+      refreshBundlesSilent();
+    }, 30000); // refresh every 30 seconds
+  }
+
+  function stopAutoRefresh() {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  }
+
+  async function refreshBundlesSilent() {
     try {
-      await apiPost("/cutting/bundles/", { cutting_order: Number(createState.cutting_order), color, size, quantity: Number(createState.quantity) });
-      createState.quantity = "";
-      await refreshBundles();
-      await renderCreateForm();
-    } catch (e) { errorBox.textContent = e.message; errorBox.style.display = "block"; }
+      const bundles = await fetchAll("/cutting/bundles/");
+      allBundles = bundles;
+      
+      // Only update if same product filter
+      const filteredBundles = filterBundlesByProduct(bundles);
+      
+      // Update counts without full reload
+      const resultSpan = document.getElementById("filter-result");
+      if (resultSpan) {
+        if (selectedProduct) {
+          const productName = getProductName(selectedProduct);
+          resultSpan.textContent = `🔄 ${filteredBundles.length} bundle(s) · ${new Date().toLocaleTimeString()}`;
+        } else {
+          resultSpan.textContent = `🔄 ${bundles.length} bundle(s) · ${new Date().toLocaleTimeString()}`;
+        }
+      }
+    } catch (e) {
+      // silent fail
+    }
   }
 
+  // ==================== BUNDLE ACTIONS ====================
   async function sendToProduction(bundle) {
     try {
       await apiPost(`/cutting/bundles/${bundle.id}/send_to_production/`, {});
+      notify.success(`✅ Bundle ${bundle.bundle_number} sent to Production`);
       await refreshBundles();
     } catch (e) { notify.error(e.message); }
   }
 
-  // ✅ Combine selected bundles
   async function combineSelected() {
     const ids = [...selected];
     if (ids.length < 2) { 
@@ -141,7 +205,6 @@
       return; 
     }
     
-    // Verify all selected bundles have same color and size
     const bundles = await fetchAll("/cutting/bundles/");
     const selectedBundles = bundles.filter(b => ids.includes(b.id));
     const colors = new Set(selectedBundles.map(b => b.color_name));
@@ -164,7 +227,7 @@
     
     try {
       const merged = await apiPost("/cutting/bundles/combine/", { bundle_ids: ids });
-      notify.success(`Combined into ${merged.bundle_number} — ${merged.quantity} pcs.`);
+      notify.success(`✅ Combined into ${merged.bundle_number} — ${merged.quantity} pcs.`);
       selected.clear();
       await refreshBundles();
     } catch (e) { 
@@ -172,16 +235,21 @@
     }
   }
 
-  // ✅ Merge ALL combinable bundles: group by cutting order + colour + size, merge each group of 2+.
   async function mergeAllCombinable() {
-    const bundles = (await fetchAll("/cutting/bundles/")).filter(combinable);
+    const filteredBundles = filterBundlesByProduct(allBundles);
+    const bundles = filteredBundles.filter(combinable);
     const groups = {};
     bundles.forEach(b => {
       const k = `${b.cutting_order}||${b.color_name}||${b.size_name}`;
       (groups[k] = groups[k] || []).push(b);
     });
     const mergeable = Object.values(groups).filter(g => g.length >= 2);
-    if (!mergeable.length) { notify.warning("No groups of 2+ same colour & size bundles to merge."); return; }
+    if (!mergeable.length) { 
+      notify.warning(selectedProduct 
+        ? `No groups of 2+ same colour & size bundles to merge for this product.` 
+        : "No groups of 2+ same colour & size bundles to merge."); 
+      return; 
+    }
     const ok = await showConfirm(
       `Merge all combinable bundles into ${mergeable.length} consolidated bundle(s)? Each colour/size group is summed into one.`,
       { title: "Merge All", confirmText: "Merge All" });
@@ -191,54 +259,93 @@
       try { await apiPost("/cutting/bundles/combine/", { bundle_ids: g.map(b => b.id) }); done++; }
       catch (e) { notify.error(`${g[0].color_name}/${g[0].size_name}: ${e.message}`); }
     }
-    notify.success(`Merged ${mergeable.length} group(s) into ${done} consolidated bundle(s).`);
+    notify.success(`✅ Merged ${mergeable.length} group(s) into ${done} consolidated bundle(s).`);
     selected.clear();
     await refreshBundles();
   }
 
-  // ✅ REFRESH BUNDLES - With manual table rendering
+  // ==================== REFRESH BUNDLES ====================
   async function refreshBundles() {
     const wrap = document.getElementById("bundles-wrap");
-    wrap.innerHTML = "Loading...";
+    wrap.innerHTML = '<div class="muted" style="padding:2rem;text-align:center;">⏳ Loading bundles...</div>';
+    
     try {
       const bundles = await fetchAll("/cutting/bundles/");
+      allBundles = bundles;
+      
+      // Populate product filter
+      populateProductFilter(bundles);
+      
+      // Filter by selected product
+      const filteredBundles = filterBundlesByProduct(bundles);
+      
+      // Update filter result
+      const resultSpan = document.getElementById("filter-result");
+      if (resultSpan) {
+        if (selectedProduct) {
+          const productName = getProductName(selectedProduct);
+          resultSpan.textContent = `📦 ${filteredBundles.length} bundle(s) · ${new Date().toLocaleTimeString()}`;
+        } else {
+          resultSpan.textContent = `📦 ${bundles.length} bundle(s) · ${new Date().toLocaleTimeString()}`;
+        }
+      }
       
       // Drop ticks for bundles that no longer qualify
       [...selected].forEach(id => { 
-        const b = bundles.find(x => x.id === id); 
+        const b = filteredBundles.find(x => x.id === id); 
         if (!b || !combinable(b)) selected.delete(id); 
       });
       
       wrap.innerHTML = "";
-      const body = el("div", {});
       
-      const groups = combinableGroups(bundles);
+      if (filteredBundles.length === 0) {
+        wrap.innerHTML = `
+          <div class="card" style="padding:2rem;text-align:center;">
+            <div style="font-size:2.5rem;margin-bottom:0.5rem;">📦</div>
+            <p class="muted" style="font-size:1rem;margin:0;">
+              ${selectedProduct ? `No bundles found for ${getProductName(selectedProduct)}` : "No bundles created yet"}
+            </p>
+            <p class="muted" style="font-size:0.85rem;margin-top:0.3rem;">
+              Bundles are auto-created when you record a cut in Cutting Orders.
+            </p>
+          </div>
+        `;
+        return;
+      }
+      
+      const body = el("div", {});
+      const groups = combinableGroups(filteredBundles);
 
-      // Create header with combine buttons (stable IDs so ticking a box updates
-      // the right button and never clobbers "Merge All").
+      // Create header with combine buttons
       const headerRow = el("div", { class: "crud-header" }, [
-        el("h3", {}, "Bundles (grouped pieces, ready for Production)"),
-        el("div", { class: "form-inline" }, [
-          el("button", { id: "merge-all-btn", class: "secondary", type: "button", onclick: mergeAllCombinable }, "🧩 Merge All"),
-          el("button", { id: "combine-selected-btn", class: "secondary", type: "button", onclick: combineSelected }, `🔗 Combine Selected (${selected.size})`),
+        el("h3", {}, selectedProduct 
+          ? `📦 ${getProductName(selectedProduct)} (${filteredBundles.length} bundles)` 
+          : `📦 All Bundles (${filteredBundles.length} bundles)`),
+        el("div", { class: "form-inline", style: "gap:0.5rem;" }, [
+          el("button", { id: "merge-all-btn", class: "secondary", type: "button", onclick: mergeAllCombinable }, 
+            groups.length ? `🧩 Merge All (${groups.length})` : "🧩 Merge All"),
+          el("button", { id: "combine-selected-btn", class: "secondary", type: "button", onclick: combineSelected }, 
+            `🔗 Combine Selected (${selected.size})`),
         ]),
       ]);
 
       wrap.appendChild(el("div", { class: "card" }, [
         headerRow,
-        el("p", { class: "muted", style: "margin:-0.3rem 0 0.6rem;" },
-          "🕒 Merge only while a bundle is CREATED and not yet sent to Production. Tick two or more bundles of the same colour & size, then Combine — or use Merge All to consolidate every matching group at once."
+        el("p", { class: "muted", style: "margin:-0.3rem 0 0.6rem;font-size:0.82rem;" },
+          selectedProduct
+            ? `🔄 Showing bundles for ${getProductName(selectedProduct)}. Tick two or more bundles of the same colour & size to combine.`
+            : "🔄 Merge only while a bundle is CREATED and not yet sent to Production. Tick two or more bundles of the same colour & size, then Combine."
         ),
         body,
       ]));
       
-      // ✅ Build table manually with checkbox column
+      // ✅ Build table with checkbox column
       const table = el("table", { class: "data-table" });
       
       // Header
       const thead = el("thead", {});
       const trHead = el("tr", {});
-      const headers = ["", "Bundle #", "Cutting #", "Order", "Color", "Size", "Qty", "Status", "Sent to Production", ""];
+      const headers = ["", "Bundle #", "Cutting #", "Order", "Color", "Size", "Qty", "Status", "Sent", ""];
       headers.forEach(h => {
         const th = el("th", {}, h);
         if (h === "") th.style.width = "30px";
@@ -249,7 +356,7 @@
       
       // Body
       const tbody = el("tbody", {});
-      bundles.forEach(b => {
+      filteredBundles.forEach(b => {
         const tr = el("tr", {});
         
         // Checkbox column
@@ -261,16 +368,16 @@
           cb.onchange = function() {
             if (this.checked) selected.add(b.id);
             else selected.delete(b.id);
-            updateCombineButtons();  // updates the Combine Selected button only
+            updateCombineButtons(groups.length);
           };
           td1.appendChild(cb);
         } else {
-          td1.appendChild(el("span", { class: "muted" }, "—"));
+          td1.appendChild(el("span", { class: "muted", style: "font-size:0.7rem;" }, "—"));
         }
         tr.appendChild(td1);
         
         // Bundle Number
-        tr.appendChild(el("td", {}, b.bundle_number || "—"));
+        tr.appendChild(el("td", { style: "font-weight:600;" }, b.bundle_number || "—"));
         
         // Cutting Number
         tr.appendChild(el("td", {}, b.cutting_number || "—"));
@@ -285,7 +392,7 @@
         tr.appendChild(el("td", {}, b.size_name || "—"));
         
         // Quantity
-        tr.appendChild(el("td", { style: "text-align:right;" }, String(b.quantity || 0)));
+        tr.appendChild(el("td", { style: "text-align:right;font-weight:600;" }, String(b.quantity || 0)));
         
         // Status
         tr.appendChild(el("td", {}, badge(b.status || "—")));
@@ -293,11 +400,9 @@
         // Sent to Production
         const sentTd = el("td", {});
         if (b.sent_to_production_at) {
-          sentTd.appendChild(el("span", {}, [
-            badge("Sent"),
-            " ",
-            b.sent_to_production_at.slice(0, 16).replace("T", " ")
-          ]));
+          sentTd.appendChild(el("span", { style: "font-size:0.75rem;color:var(--text-muted);" }, 
+            new Date(b.sent_to_production_at).toLocaleDateString()
+          ));
         } else {
           sentTd.appendChild(badge("Not Sent"));
         }
@@ -307,12 +412,14 @@
         const actionTd = el("td", {});
         if (!b.sent_to_production_at) {
           const sendBtn = el("button", { 
+            class: "success",
             type: "button", 
+            style: "padding:0.25rem 0.7rem;font-size:0.75rem;",
             onclick: () => sendToProduction(b) 
-          }, "Send to Production");
+          }, "📤 Send");
           actionTd.appendChild(sendBtn);
         } else {
-          actionTd.appendChild(el("span", { class: "muted" }, "—"));
+          actionTd.appendChild(el("span", { class: "muted", style: "font-size:0.75rem;" }, "✅ Done"));
         }
         tr.appendChild(actionTd);
         
@@ -322,32 +429,38 @@
       body.appendChild(table);
       
       // Summary
-      const total = bundles.length;
-      const combinableCount = bundles.filter(b => combinable(b)).length;
-      body.appendChild(el("p", { class: "muted", style: "margin-top:0.5rem;" },
-        `${total} bundles · ${combinableCount} combinable (CREATED, not sent) · ${groups.length} mergeable group${groups.length === 1 ? "" : "s"}`
+      const total = filteredBundles.length;
+      const combinableCount = filteredBundles.filter(b => combinable(b)).length;
+      body.appendChild(el("p", { class: "muted", style: "margin-top:0.5rem;font-size:0.8rem;" },
+        `📊 ${total} bundles · ${combinableCount} combinable · ${groups.length} mergeable group${groups.length === 1 ? "" : "s"}`
       ));
 
-      // Set the two header buttons' labels + disabled states now that we know
-      // how many mergeable groups exist.
+      // Set button states
       updateCombineButtons(groups.length);
 
+      // Start auto-refresh
+      startAutoRefresh();
+
     } catch (e) { 
-      wrap.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; 
+      wrap.innerHTML = `<p class="error-msg">❌ Could not load bundles: ${e.message}</p>`; 
     }
   }
 
   // ==================== INIT ====================
   (async function init() {
-    CUTTING_ORDERS = await fetchAll("/cutting/cutting-orders/?status=COMPLETED");
-    await renderCreateForm();
     await refreshBundles();
 
+    // Clean up timer on page unload
+    window.addEventListener("beforeunload", function() {
+      stopAutoRefresh();
+    });
+
+    // Also show cutting pieces panel
     const allCuttingOrders = await fetchAll("/cutting/cutting-orders/");
     const cuttingOrderNumber = id => (allCuttingOrders.find(c => c.id === id) || {}).cutting_number || id;
 
     crudPanel(document.getElementById("pieces-panel"), {
-      title: "Cutting Pieces (by color, size & component)",
+      title: "📋 Cutting Pieces (by color, size & component)",
       endpoint: "/cutting/pieces/",
       columns: [
         { render: p => cuttingOrderNumber(p.cutting_order), label: "Cutting Order" },

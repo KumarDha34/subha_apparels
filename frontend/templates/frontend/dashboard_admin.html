@@ -570,6 +570,30 @@
         body.appendChild(t);
       }
       body.appendChild(el("p", { class: "muted", style: "margin-top:0.6rem;" }, `Final QC rejected: ${d.finishing.final_qc_rejected}`));
+
+      // Final-QC audit by colour + size: the full rework journey.
+      const qcb = (d.finishing.qc_breakdown || []);
+      body.appendChild(el("div", { class: "section-title" }, "🔁 Final QC — by colour & size (rework journey)"));
+      if (!qcb.length) {
+        body.appendChild(el("p", { class: "muted" }, "No final QC recorded yet."));
+      } else {
+        const qt = el("div", {});
+        dataTable(qt, {
+          columns: [
+            { label: "Colour", key: "color" }, { label: "Size", key: "size" },
+            { label: "Checked", key: "checked" },
+            { label: "Passed (1st)", key: "passed" },
+            { label: "Altered", key: "altered", render: r => (r.altered ? el("span", { style: "color:#b4690e;font-weight:600;" }, String(r.altered)) : "0") },
+            { label: "Reworked ✓", key: "reworked_passed", render: r => (r.reworked_passed ? el("span", { style: "color:#1a7f4b;font-weight:600;" }, String(r.reworked_passed)) : "0") },
+            { label: "Rejected", key: "rejected", render: r => lossCell((r.rejected || 0) + (r.reworked_failed || 0)) },
+            { label: "Final Good", key: "final_good", render: r => el("strong", {}, String(r.final_good)) },
+          ], rows: qcb, pageSize: 12, searchable: false,
+        });
+        body.appendChild(qt);
+        const tot = d.finishing.qc_totals || {};
+        body.appendChild(el("p", { class: "muted", style: "margin-top:0.4rem;font-size:0.82rem;" },
+          `Totals — checked ${tot.checked || 0} → passed ${tot.passed || 0} + reworked ✓ ${tot.reworked_passed || 0} = final good ${tot.final_good || 0}; altered ${tot.altered || 0}, rejected ${(tot.rejected || 0) + (tot.reworked_failed || 0)}.`));
+      }
     } catch (e) { body.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
   }
   loadLossTracking();

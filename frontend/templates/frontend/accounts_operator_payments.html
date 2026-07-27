@@ -90,11 +90,12 @@
       ]));
       return;
     }
-    let d, accessories = [];
+    let d, accessories = [], reworks = [];
     try {
-      [d, accessories] = await Promise.all([
+      [d, accessories, reworks] = await Promise.all([
         apiGet(`/operators/assignments/work_summary/?operator=${opId}`),
         fetchAll(`/production/operator-accessory-issues/?operator=${opId}`).catch(() => []),
+        fetchAll(`/finishing/rework-assignments/?operator=${opId}`).catch(() => []),
       ]);
     }
     catch (e) { wrap.innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
@@ -154,6 +155,47 @@
             ? el("button", { type: "button", onclick: () => payBundle(r) }, "Pay") : el("span", { class: "badge success" }, "Paid")) },
       ], rows: d.completed, pageSize: 12, searchPlaceholder: "Search — order, product, bundle…", emptyText: "No completed work.",
     });
+
+    // ---- rework earnings (alteration pieces reworked by this operator) ----
+    const completedRework = reworks.filter(r => r.status === "COMPLETED");
+    if (completedRework.length) {
+      const rbody = el("div", {});
+      const rEarned = completedRework.reduce((s, r) => s + Number(r.earned_amount || 0), 0);
+      const rPaid = completedRework.reduce((s, r) => s + Number(r.paid_amount || 0), 0);
+      const rPending = completedRework.reduce((s, r) => s + Number(r.pending_pay_amount || 0), 0);
+      const payAllRework = async () => {
+        const payable = completedRework.filter(r => r.pending_pay_quantity > 0);
+        if (!payable.length) { notify.warning("No rework pending payment."); return; }
+        if (!(await showConfirm(`Pay all pending rework: ${payable.length} task(s), ${fmtMoney(rPending)}?`, { title: "Pay all rework", confirmText: "Pay All" }))) return;
+        let n = 0;
+        for (const r of payable) { try { await apiPost(`/finishing/rework-assignments/${r.id}/pay/`, {}); n++; } catch (e) { notify.error(e.message); } }
+        notify.success(`Paid ${n} rework task(s).`); await loadSummary(current);
+      };
+      wrap.appendChild(el("div", { class: "card", style: "border-left:4px solid #b4690e;" }, [
+        el("div", { class: "crud-header" }, [
+          el("h3", {}, `🔁 Rework Earnings (${completedRework.length})`),
+          el("div", { style: "display:flex;gap:.6rem;align-items:center;" }, [
+            el("span", { class: "muted", style: "font-size:.82rem;" }, `Earned ${fmtMoney(rEarned)} · Paid ${fmtMoney(rPaid)} · Pending ${fmtMoney(rPending)}`),
+            rPending > 0 ? el("button", { class: "secondary", type: "button", onclick: payAllRework }, "💵 Pay All Rework") : null,
+          ].filter(Boolean)),
+        ]),
+        rbody,
+      ]));
+      dataTable(rbody, {
+        columns: [
+          { label: "Order", value: r => r.order_number || "", render: r => r.order_number || "—" },
+          { label: "Colour/Size", sortable: false, render: r => `${r.color_name || "—"}/${r.size_name || "—"}` },
+          { label: "Reworked", num: true, value: r => Number(r.returned_quantity || 0), render: r => String(r.returned_quantity || 0) },
+          { label: "Rate", num: true, value: r => Number(r.rate_per_piece || 0), render: r => fmtMoney(r.rate_per_piece) },
+          { label: "Earned", num: true, value: r => Number(r.earned_amount || 0), render: r => fmtMoney(r.earned_amount) },
+          { label: "Paid", num: true, value: r => Number(r.paid_amount || 0), render: r => el("span", { style: "color:#1a7f4b;" }, fmtMoney(r.paid_amount)) },
+          { label: "Pending", num: true, value: r => Number(r.pending_pay_amount || 0), render: r => el("strong", { style: `color:${r.pending_pay_amount > 0 ? "#b4690e" : "var(--text-muted)"};` }, fmtMoney(r.pending_pay_amount)) },
+          { label: "Action", sortable: false, render: r => (r.pending_pay_quantity > 0
+              ? el("button", { type: "button", onclick: async () => { try { await apiPost(`/finishing/rework-assignments/${r.id}/pay/`, {}); notify.success("Rework paid."); await loadSummary(current); } catch (e) { notify.error(e.message); } } }, "Pay")
+              : el("span", { class: "badge success" }, "Paid")) },
+        ], rows: completedRework, pageSize: 8, searchPlaceholder: "Search rework…", emptyText: "No rework.",
+      });
+    }
 
     // ---- accessories issued to this operator ----
     const abody = el("div", {});

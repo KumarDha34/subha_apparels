@@ -1,11 +1,12 @@
+from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from apps.users.permissions import ReadOnlyOrHasRole
-from .models import FinishingQualityCheck, Packing, Dispatch, FinishingOperation, FinishingReceipt
+from .models import FinishingQualityCheck, Packing, Dispatch, FinishingOperation, FinishingReceipt, ReworkAssignment
 from .serializers import (
     FinishingQualityCheckSerializer, PackingSerializer, DispatchSerializer,
-    FinishingOperationSerializer, FinishingReceiptSerializer,
+    FinishingOperationSerializer, FinishingReceiptSerializer, ReworkAssignmentSerializer,
 )
 
 
@@ -63,6 +64,57 @@ class FinishingQualityCheckViewSet(viewsets.ModelViewSet):
         qc.quantity_reworked_failed += failed
         qc.save(update_fields=["quantity_reworked_passed", "quantity_reworked_failed", "updated_at"])
         return Response(self.get_serializer(qc).data)
+
+
+class ReworkAssignmentViewSet(viewsets.ModelViewSet):
+    """The Production-side rework loop: allocate altered pieces to an operator
+    at a rate/piece, then record completion when the operator returns them."""
+    queryset = ReworkAssignment.objects.select_related(
+        "qc__order", "qc__color", "qc__size", "operator", "allocated_by").all().order_by("-created_at")
+    serializer_class = ReworkAssignmentSerializer
+    permission_classes = [ReadOnlyOrHasRole]
+    required_roles = ["ADMIN", "PRODUCTION_SUPERVISOR"]
+    filterset_fields = ["qc", "operator", "status", "qc__order"]
+
+    def get_permissions(self):
+        # Accounts pays operators, so it may record a rework payment.
+        if getattr(self, "action", None) == "pay":
+            self.required_roles = ["ADMIN", "ACCOUNTS", "PRODUCTION_SUPERVISOR"]
+        return super().get_permissions()
+
+    @action(detail=True, methods=["post"])
+    def complete(self, request, pk=None):
+        """Operator has reworked the pieces and handed them back to Finishing.
+        Body: {returned_quantity}. The pieces now await a second QC. Defaults to
+        the full allocated quantity."""
+        ra = self.get_object()
+        if ra.status == ReworkAssignment.Status.COMPLETED:
+            return Response({"detail": "This rework task is already completed."}, status=400)
+        qty = request.data.get("returned_quantity")
+        qty = ra.quantity if qty is None else int(qty)
+        if qty <= 0 or qty > ra.quantity:
+            return Response({"detail": f"returned_quantity must be between 1 and {ra.quantity} (allocated)."}, status=400)
+        ra.returned_quantity = qty
+        ra.status = ReworkAssignment.Status.COMPLETED
+        ra.completed_at = timezone.now()
+        ra.save(update_fields=["returned_quantity", "status", "completed_at", "updated_at"])
+        return Response(self.get_serializer(ra).data)
+
+    @action(detail=True, methods=["post"])
+    def pay(self, request, pk=None):
+        """Record a rework payment to the operator. Body: {quantity?} (defaults
+        to all still-unpaid returned pieces)."""
+        ra = self.get_object()
+        if ra.status != ReworkAssignment.Status.COMPLETED:
+            return Response({"detail": "Rework must be completed before it can be paid."}, status=400)
+        pending = ra.pending_pay_quantity
+        qty = request.data.get("quantity")
+        qty = pending if qty is None else int(qty)
+        if qty <= 0 or qty > pending:
+            return Response({"detail": f"quantity must be between 1 and {pending} (unpaid returned pieces)."}, status=400)
+        ra.paid_quantity += qty
+        ra.save(update_fields=["paid_quantity", "updated_at"])
+        return Response(self.get_serializer(ra).data)
 
 
 class PackingViewSet(viewsets.ModelViewSet):

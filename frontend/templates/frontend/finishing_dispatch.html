@@ -32,18 +32,24 @@
         [el("strong", {}, k), el("span", { class: "muted" }, String(v))])));
   }
 
-  // Size + colour breakdown of the pieces that passed Finishing QC.
+  // Size + colour breakdown of the good pieces ready to ship — first-pass
+  // passed PLUS reworked-and-passed (final_good), minus whatever's already
+  // been dispatched on earlier (partial) challans for this order.
   async function passedBreakdown(orderId) {
-    const qcs = await fetchAll(`/finishing/quality-checks/?order=${orderId}`).catch(() => []);
-    const bySize = {}, byColor = {}; let total = 0;
+    const [qcs, dispatches] = await Promise.all([
+      fetchAll(`/finishing/quality-checks/?order=${orderId}`).catch(() => []),
+      fetchAll(`/finishing/dispatch/?order=${orderId}`).catch(() => []),
+    ]);
+    const bySize = {}, byColor = {}; let finalGood = 0;
     qcs.forEach(q => {
-      const p = q.quantity_passed || 0; if (!p) return;
-      total += p;
+      const p = q.final_good || 0; if (!p) return;
+      finalGood += p;
       const s = q.size_name || "—", c = q.color_name || "—";
       bySize[s] = (bySize[s] || 0) + p;
       byColor[c] = (byColor[c] || 0) + p;
     });
-    return { total, bySize, byColor };
+    const already = dispatches.reduce((s, d) => s + Number(d.quantity_dispatched || 0), 0);
+    return { total: Math.max(finalGood - already, 0), finalGood, already, bySize, byColor };
   }
 
   function openPrintWindow(title, bodyHtml) {
@@ -85,7 +91,8 @@
         state.finalQty = bd.total; state.sizeBd = bd.bySize; state.colorBd = bd.byColor;
         finalLine.style.display = "";
         finalLine.innerHTML = "";
-        finalLine.append(el("strong", {}, "Final available: "), `${state.finalQty} pieces passed QC — enter how many to dispatch.`);
+        const note = bd.already > 0 ? ` (QC-passed ${bd.finalGood}, already dispatched ${bd.already})` : "";
+        finalLine.append(el("strong", {}, "Available to dispatch: "), `${state.finalQty} good piece(s)${note} — dispatch this many or fewer; the rest can go on a later partial shipment.`);
         state.quantity = String(state.finalQty);
         qtyInput.value = state.quantity;
       } else { finalLine.style.display = "none"; }
