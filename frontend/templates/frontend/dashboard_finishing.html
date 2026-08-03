@@ -1,15 +1,26 @@
 {% extends "frontend/base.html" %}
 {% block title %}Finishing - GMS{% endblock %}
 {% block content %}
-  <h2 class="page-title">Finishing & Dispatch Dashboard</h2>
-  <p class="page-subtitle">Overview of pieces received from Production, finishing operations, and dispatch.</p>
+  <h2 class="page-title">Finishing &amp; Dispatch Dashboard</h2>
+  <p class="page-subtitle">Pieces received from Production, quality-check outcomes, rework and dispatch — at a glance.</p>
 
   <div class="grid grid-4" id="stat-cards"></div>
+
+  <div class="grid grid-2">
+    <div class="card"><h3>🔍 Quality-Check Outcomes</h3><p class="card-subtitle">Passed, altered (rework) and rejected across all QC.</p><div id="qc-donut" class="muted">Loading…</div></div>
+    <div class="card"><h3>🚚 Ready to Dispatch</h3><p class="card-subtitle">Orders with good pieces awaiting a challan.</p><div id="ready" class="muted">Loading…</div></div>
+  </div>
+
+  <div class="card">
+    <h3>📦 Recent Dispatches</h3>
+    <div id="dispatches" class="muted">Loading…</div>
+  </div>
 
   <div class="card">
     <h3>Quick Links</h3>
     <div class="form-inline">
-      <a class="btn secondary" href="/finishing/operations/">🧵 Finishing Operations</a>
+      <a class="btn secondary" href="/finishing/receive/">📥 Receive from Production</a>
+      <a class="btn secondary" href="/finishing/operations/">✅ Quality Check</a>
       <a class="btn secondary" href="/finishing/dispatch/">🚚 Dispatch</a>
     </div>
   </div>
@@ -17,30 +28,106 @@
 
 {% block scripts %}
 <script>
-  Auth.guardPage(["FINISHING_SUPERVISOR"]);
+  Auth.guardPage(["ADMIN", "FINISHING_SUPERVISOR"]);
   renderShell("finishing", "Finishing & Dispatch");
 
-  async function loadStats() {
-    const cards = document.getElementById("stat-cards");
-    const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
-      el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
-    ]);
-    try {
-      const receipts = await fetchAll("/finishing/receipts/");
-      const totalReceived = receipts.reduce((s, r) => s + r.quantity_sent, 0);
-      cards.appendChild(stat("Pieces Received from Production", totalReceived));
-    } catch (e) {}
-    try {
-      const ops = await fetchAll("/finishing/operations/");
-      cards.appendChild(stat("Finishing Operations", ops.length));
-      cards.appendChild(stat("Pending / In Progress", ops.filter(o => o.status !== "COMPLETED").length, "warning"));
-    } catch (e) {}
-    try {
-      const dispatch = await fetchAll("/finishing/dispatch/");
-      cards.appendChild(stat("Pending Dispatch", dispatch.filter(d => d.status === "PENDING").length, "danger"));
-      cards.appendChild(stat("Dispatched", dispatch.filter(d => d.status === "DISPATCHED" || d.status === "DELIVERED").length, "success"));
-    } catch (e) {}
+  const GREEN = "#1a7f4b", BLUE = "#0369a1", RED = "#b3261e", AMBER = "#b4690e";
+  function tile(icon, label, value, tone) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? RED : tone === "warn" ? AMBER : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.7rem;padding:1rem 1.1rem;" }, [
+      el("div", { style: "font-size:1.5rem;" }, icon),
+      el("div", {}, [el("div", { class: "value", style: `font-size:1.35rem;color:${c};` }, String(value)), el("div", { class: "label" }, label)])]);
   }
-  loadStats();
+  // SVG donut for QC status outcomes (status colours + a labelled legend).
+  function donut(segments) {
+    const total = segments.reduce((s, x) => s + x.value, 0);
+    const ns = "http://www.w3.org/2000/svg", R = 60, r = 38, cx = 70, cy = 70, gap = 0.03;
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 140 140"); svg.setAttribute("width", "150"); svg.setAttribute("height", "150");
+    if (!total) { svg.appendChild(Object.assign(document.createElementNS(ns, "circle"), {})); }
+    let a0 = -Math.PI / 2;
+    segments.forEach(seg => {
+      const frac = total ? seg.value / total : 0; if (frac <= 0) return;
+      const a1 = a0 + frac * 2 * Math.PI, large = (a1 - a0) > Math.PI ? 1 : 0, g = frac < 0.02 ? 0 : gap;
+      const p = document.createElementNS(ns, "path");
+      const xo0 = cx + R * Math.cos(a0 + g), yo0 = cy + R * Math.sin(a0 + g), xo1 = cx + R * Math.cos(a1 - g), yo1 = cy + R * Math.sin(a1 - g);
+      const xi1 = cx + r * Math.cos(a1 - g), yi1 = cy + r * Math.sin(a1 - g), xi0 = cx + r * Math.cos(a0 + g), yi0 = cy + r * Math.sin(a0 + g);
+      p.setAttribute("d", `M${xo0} ${yo0} A${R} ${R} 0 ${large} 1 ${xo1} ${yo1} L${xi1} ${yi1} A${r} ${r} 0 ${large} 0 ${xi0} ${yi0} Z`);
+      p.setAttribute("fill", seg.color);
+      const t = document.createElementNS(ns, "title"); t.textContent = `${seg.label}: ${seg.value} (${Math.round(frac * 100)}%)`; p.appendChild(t);
+      svg.appendChild(p); a0 = a1;
+    });
+    const legend = el("div", { style: "display:flex;flex-direction:column;gap:0.35rem;" },
+      segments.map(s => el("div", { style: "display:flex;align-items:center;gap:0.45rem;font-size:0.85rem;" }, [
+        el("span", { style: `width:12px;height:12px;border-radius:3px;background:${s.color};display:inline-block;` }),
+        el("span", {}, s.label), el("strong", { style: "margin-left:auto;" }, `${s.value} · ${total ? Math.round(s.value / total * 100) : 0}%`)])));
+    return el("div", { style: "display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap;" }, [svg, el("div", { style: "flex:1;min-width:180px;" }, [legend])]);
+  }
+
+  async function load() {
+    const [receipts, qcs, dispatches, orders] = await Promise.all([
+      fetchAll("/finishing/receipts/").catch(() => []),
+      fetchAll("/finishing/quality-checks/").catch(() => []),
+      fetchAll("/finishing/dispatch/").catch(() => []),
+      fetchAll("/orders/").catch(() => []),
+    ]);
+    const received = receipts.reduce((s, r) => s + (r.quantity_sent || 0), 0);
+    const passed = qcs.reduce((s, q) => s + (q.quantity_passed || 0), 0);
+    const reworked = qcs.reduce((s, q) => s + (q.quantity_reworked_passed || 0), 0);
+    const altered = qcs.reduce((s, q) => s + (q.alteration_pending || 0), 0);
+    const rejected = qcs.reduce((s, q) => s + (q.quantity_rejected || 0) + (q.quantity_reworked_failed || 0), 0);
+    const finalGood = qcs.reduce((s, q) => s + (q.final_good || 0), 0);
+    const dispatched = dispatches.reduce((s, d) => s + (d.quantity_dispatched || 0), 0);
+    const inFinishing = orders.filter(o => o.status === "IN_FINISHING").length;
+
+    const cards = document.getElementById("stat-cards"); cards.innerHTML = "";
+    cards.append(
+      tile("📥", "Received from Production", received, "info"),
+      tile("✅", "QC Passed (final good)", finalGood, "good"),
+      tile("🔁", "Awaiting Rework", altered, altered ? "warn" : "good"),
+      tile("❌", "Rejected", rejected, rejected ? "bad" : "good"),
+      tile("⏳", "Orders In Finishing", inFinishing, inFinishing ? "warn" : "good"),
+      tile("🚚", "Pieces Dispatched", dispatched, "good"),
+      tile("📄", "Dispatch Challans", dispatches.filter(d => d.status === "DISPATCHED" || d.status === "DELIVERED").length, "info"),
+      tile("📈", "Pass Rate", (passed + reworked + rejected) ? Math.round((passed + reworked) / (passed + reworked + rejected) * 100) + "%" : "—", "good"));
+
+    document.getElementById("qc-donut").replaceChildren(donut([
+      { label: "Passed", value: passed, color: GREEN },
+      { label: "Reworked ✓", value: reworked, color: BLUE },
+      { label: "Altered (pending)", value: altered, color: AMBER },
+      { label: "Rejected", value: rejected, color: RED },
+    ]));
+
+    // Ready to dispatch: orders in finishing/dispatched-soon with QC good pieces not yet fully shipped.
+    const goodByOrder = {}, dispByOrder = {};
+    qcs.forEach(q => { goodByOrder[q.order_number || q.order] = (goodByOrder[q.order_number || q.order] || 0) + (q.final_good || 0); });
+    dispatches.forEach(d => { dispByOrder[d.order_number || d.order] = (dispByOrder[d.order_number || d.order] || 0) + (d.quantity_dispatched || 0); });
+    const readyRows = Object.keys(goodByOrder).map(o => ({ order: o, good: goodByOrder[o], shipped: dispByOrder[o] || 0, ready: Math.max(goodByOrder[o] - (dispByOrder[o] || 0), 0) }))
+      .filter(r => r.ready > 0).sort((a, b) => b.ready - a.ready);
+    const rwrap = document.getElementById("ready"); rwrap.innerHTML = "";
+    if (!readyRows.length) rwrap.appendChild(el("p", { class: "muted" }, "Nothing waiting — all good pieces dispatched. 🎉"));
+    else dataTable(rwrap, {
+      columns: [
+        { label: "Order", key: "order" },
+        { label: "QC Good", num: true, value: r => r.good, render: r => String(r.good) },
+        { label: "Shipped", num: true, value: r => r.shipped, render: r => String(r.shipped) },
+        { label: "Ready", num: true, value: r => r.ready, render: r => el("strong", { style: `color:${GREEN};` }, String(r.ready)) },
+      ], rows: readyRows, pageSize: 6, searchable: false, emptyText: "None.",
+    });
+
+    const dwrap = document.getElementById("dispatches"); dwrap.innerHTML = "";
+    const dl = dispatches.filter(d => d.quantity_dispatched);
+    if (!dl.length) dwrap.appendChild(el("p", { class: "muted" }, "No dispatches yet."));
+    else dataTable(dwrap, {
+      columns: [
+        { label: "Order", key: "order_number", render: d => d.order_number || "—" },
+        { label: "Challan", key: "challan_number", render: d => d.challan_number || "—" },
+        { label: "Qty", num: true, value: d => Number(d.quantity_dispatched || 0), render: d => String(d.quantity_dispatched || 0) },
+        { label: "Date", key: "dispatch_date", render: d => d.dispatch_date || "—" },
+        { label: "Status", value: d => d.status, render: d => badge(d.status) },
+      ], rows: dl, pageSize: 8, initialSort: { key: "dispatch_date", dir: "desc" }, searchPlaceholder: "Search…", emptyText: "None.",
+    });
+  }
+  load();
 </script>
 {% endblock %}

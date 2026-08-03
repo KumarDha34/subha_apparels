@@ -183,7 +183,9 @@ class Dispatch(TimeStampedModel):
         COURIER = "COURIER", "Courier"
         OTHER = "OTHER", "Other"
 
-    order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name="dispatch")
+    # ForeignKey (not OneToOne): an order can be dispatched in several partial
+    # shipments, each its own challan, until all good pieces are shipped.
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="dispatches")
     dispatched_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, related_name="dispatches")
     dispatch_date = models.DateField(null=True, blank=True)
     challan_number = models.CharField(max_length=100, blank=True, help_text="Delivery challan number.")

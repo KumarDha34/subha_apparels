@@ -7,7 +7,20 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{% static 'css/style.css' %}?v=20260767">
+  <link rel="stylesheet" href="{% static 'css/style.css' %}?v=20260770">
+  <style>
+    /* Password toggle: keep it above the input so every click lands on it,
+       give it clear hover / active / keyboard-focus feedback. */
+    .field.has-icon { position: relative; }
+    .pw-toggle {
+      z-index: 3; line-height: 1; user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      display: inline-flex; align-items: center; justify-content: center;
+      transition: background 0.15s ease, transform 0.08s ease, color 0.15s ease;
+    }
+    .pw-toggle:active { transform: translateY(-50%) scale(0.9); }
+    .pw-toggle:focus-visible { outline: 2px solid var(--brand, #e66239); outline-offset: 2px; }
+  </style>
 </head>
 <body>
   <div class="login-wrap">
@@ -64,7 +77,7 @@
         <div class="field has-icon">
           <input type="password" id="password" autocomplete="current-password" placeholder=" ">
           <label for="password">Password</label>
-          <button type="button" class="pw-toggle" id="pw-toggle" aria-label="Show password">👁</button>
+          <button type="button" class="pw-toggle" id="pw-toggle" aria-label="Show password" aria-pressed="false" title="Show password">👁</button>
         </div>
 
         <div class="form-aux">
@@ -77,7 +90,7 @@
       </div>
     </div>
   </div>
-  <script src="{% static 'js/api.js' %}?v=20260767"></script>
+  <script src="{% static 'js/api.js' %}?v=20260770"></script>
   <script>
     if (Auth.isLoggedIn()) redirectToOwnDashboard();
 
@@ -124,14 +137,29 @@
       overlay.appendChild(card); document.body.appendChild(overlay); emailI.focus();
     }
 
+    // Password visibility toggle — reliable on every click, keyboard-accessible,
+    // and it announces its state via ARIA. Works by reading the input's CURRENT
+    // type each time, so it can never fall out of sync.
     const pwInput = document.getElementById("password");
     const pwToggle = document.getElementById("pw-toggle");
-    pwToggle.addEventListener("click", () => {
-      const show = pwInput.type === "password";
+    function setPasswordVisible(show) {
       pwInput.type = show ? "text" : "password";
       pwToggle.textContent = show ? "🙈" : "👁";
-      pwInput.focus();
-    });
+      const label = show ? "Hide password" : "Show password";
+      pwToggle.setAttribute("aria-pressed", show ? "true" : "false");
+      pwToggle.setAttribute("aria-label", label);
+      pwToggle.setAttribute("title", label);
+    }
+    if (pwInput && pwToggle) {
+      // Prevent the button from stealing focus from the input on mouse press —
+      // keeps the caret and the floating label steady, so the toggle feels
+      // instant with no flicker. The click still fires normally.
+      pwToggle.addEventListener("mousedown", (e) => e.preventDefault());
+      pwToggle.addEventListener("click", (e) => {
+        e.preventDefault();
+        setPasswordVisible(pwInput.type === "password");   // flip based on live state
+      });
+    }
 
     pwInput.addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
     document.getElementById("username").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });

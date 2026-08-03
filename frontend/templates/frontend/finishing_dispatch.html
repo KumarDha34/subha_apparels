@@ -14,7 +14,7 @@
   renderShell("finishing-dispatch", "Dispatch");
 
   let ORDERS = [];
-  let state = { order: "", quantity: "", finalQty: null, challan: "", sizeBd: {}, colorBd: {} };
+  let state = { order: "", challan: "", sizeBd: {}, colorBd: {}, avail: null, finalAvail: 0, finalGood: 0, already: 0, _remS: {}, _remC: {} };
 
   // --- attractive breakdown widgets (shared look with the QC screen) ---
   function statTile(label, value, tone) {
@@ -67,64 +67,117 @@
     const wrap = document.getElementById("dispatch-form");
     wrap.innerHTML = "";
     const err = el("div", { class: "error-msg", style: "display:none;" });
-    const finalLine = el("div", { class: "mode-banner mode-fixed", style: state.order ? "" : "display:none;" });
-    const breakdownWrap = el("div", { style: "margin-top:0.6rem;" });
-    const qtyInput = numberInput(state.quantity, v => state.quantity = v, { min: "0", step: "1", placeholder: "pieces to dispatch" });
+    const infoLine = el("div", { class: "mode-banner mode-fixed", style: state.order ? "" : "display:none;" });
+    const dimWrap = el("div", { style: "margin-top:0.8rem;" });
+    const totalLine = el("div", { style: "margin-top:0.7rem;font-size:0.95rem;" });
+    const submitBtn = el("button", { type: "button" }, "Dispatch");
 
-    function renderBreakdown() {
-      breakdownWrap.innerHTML = "";
-      if (!state.order || state.finalQty == null) return;
-      breakdownWrap.appendChild(el("div", { class: "subcard", style: "padding:0.9rem 1rem;border:1px solid var(--border,#e7e0da);border-radius:12px;" }, [
-        el("div", { style: "display:flex;gap:0.6rem;flex-wrap:wrap;margin-bottom:0.7rem;" }, [
-          statTile("Passed QC — ready to dispatch", state.finalQty, "good"),
-        ]),
-        el("div", { class: "section-title" }, "Size breakdown"), bdPills(state.sizeBd),
-        el("div", { class: "section-title" }, "Colour breakdown"), bdPills(state.colorBd),
-        el("p", { class: "muted", style: "margin:0.6rem 0 0;" }, "Auto-filled from Quality Check — this is what prints on the challan."),
+    // Live recompute of totals, remaining and validity on every keystroke.
+    function recompute() {
+      if (!state.avail) return;
+      let sizeTotal = 0, colorTotal = 0, over = false;
+      Object.entries(state.avail.by_size).forEach(([s, avail]) => {
+        const entered = Number(state.sizeBd[s] || 0); sizeTotal += entered;
+        const rem = avail - entered, span = state._remS[s];
+        if (span) { span.textContent = `avail ${avail} · remaining ${Math.max(rem, 0)}`; span.style.color = rem < 0 ? "#b3261e" : "#5b6472"; }
+        if (entered > avail || entered < 0) over = true;
+      });
+      Object.entries(state.avail.by_color).forEach(([c, avail]) => {
+        const entered = Number(state.colorBd[c] || 0); colorTotal += entered;
+        const rem = avail - entered, span = state._remC[c];
+        if (span) { span.textContent = `avail ${avail} · remaining ${Math.max(rem, 0)}`; span.style.color = rem < 0 ? "#b3261e" : "#5b6472"; }
+        if (entered > avail || entered < 0) over = true;
+      });
+      const mismatch = sizeTotal !== colorTotal;
+      totalLine.innerHTML = "";
+      totalLine.append(
+        el("strong", {}, `Total to dispatch: ${sizeTotal} piece(s)`), "  ·  ",
+        el("span", { style: "color:#5b6472;" }, `Remaining in inventory after this dispatch: ${Math.max(state.finalAvail - sizeTotal, 0)}`));
+      if (mismatch) totalLine.append(el("div", { style: "color:#b4690e;font-size:0.85rem;margin-top:0.2rem;" },
+        `⚠ Size total (${sizeTotal}) and colour total (${colorTotal}) must match — they count the same pieces.`));
+      if (over) totalLine.append(el("div", { style: "color:#b3261e;font-size:0.85rem;margin-top:0.2rem;" },
+        "⚠ One or more entries exceed what passed QC. Reduce them to dispatch."));
+      const invalid = over || mismatch || sizeTotal <= 0;
+      submitBtn.disabled = invalid; submitBtn.style.opacity = invalid ? "0.55" : "1";
+    }
+
+    function dimInput(dim, key, avail) {
+      const inp = numberInput(String(state[dim][key] ?? avail), v => { state[dim][key] = v === "" ? 0 : Number(v); recompute(); }, { min: "0", max: String(avail), step: "1", style: "width:80px;" });
+      const rem = el("span", { style: "font-size:0.78rem;color:#5b6472;margin-left:0.4rem;white-space:nowrap;" });
+      (dim === "sizeBd" ? state._remS : state._remC)[key] = rem;
+      return el("div", { style: "display:flex;align-items:center;gap:0.3rem;" }, [
+        el("label", { style: "min-width:52px;font-weight:600;" }, key), inp, rem]);
+    }
+
+    function renderDims() {
+      dimWrap.innerHTML = "";
+      if (!state.order || !state.avail) return;
+      state._remS = {}; state._remC = {};
+      const sizeRows = Object.entries(state.avail.by_size).map(([s, a]) => dimInput("sizeBd", s, a));
+      const colorRows = Object.entries(state.avail.by_color).map(([c, a]) => dimInput("colorBd", c, a));
+      dimWrap.appendChild(el("div", { class: "subcard", style: "padding:0.9rem 1rem;border:1px solid var(--border,#e7e0da);border-radius:12px;" }, [
+        el("div", { style: "display:flex;gap:0.6rem;flex-wrap:wrap;margin-bottom:0.6rem;" }, [statTile("Available to dispatch (passed QC)", state.finalAvail, "good")]),
+        el("div", { class: "section-title" }, "Size-wise dispatch (auto-filled from QC — edit to ship part)"),
+        el("div", { style: "display:flex;flex-wrap:wrap;gap:0.6rem 1.4rem;" }, sizeRows.length ? sizeRows : [el("p", { class: "muted" }, "No sizes.")]),
+        el("div", { class: "section-title", style: "margin-top:0.8rem;" }, "Colour-wise dispatch"),
+        el("div", { style: "display:flex;flex-wrap:wrap;gap:0.6rem 1.4rem;" }, colorRows.length ? colorRows : [el("p", { class: "muted" }, "No colours.")]),
+        totalLine,
+        el("p", { class: "muted", style: "margin:0.5rem 0 0;font-size:0.8rem;" }, "The challan prints exactly what you dispatch here — not the QC total. Remaining pieces stay in inventory for a later shipment."),
       ]));
+      recompute();
     }
 
     async function onOrder(id) {
-      state.order = id; state.finalQty = null; state.quantity = ""; state.sizeBd = {}; state.colorBd = {};
+      state.order = id; state.sizeBd = {}; state.colorBd = {}; state.avail = null;
       if (id) {
-        const bd = await passedBreakdown(id);
-        state.finalQty = bd.total; state.sizeBd = bd.bySize; state.colorBd = bd.byColor;
-        finalLine.style.display = "";
-        finalLine.innerHTML = "";
-        const note = bd.already > 0 ? ` (QC-passed ${bd.finalGood}, already dispatched ${bd.already})` : "";
-        finalLine.append(el("strong", {}, "Available to dispatch: "), `${state.finalQty} good piece(s)${note} — dispatch this many or fewer; the rest can go on a later partial shipment.`);
-        state.quantity = String(state.finalQty);
-        qtyInput.value = state.quantity;
-      } else { finalLine.style.display = "none"; }
-      renderBreakdown();
+        const a = await apiGet(`/finishing/dispatch/availability/?order=${id}`).catch(() => null);
+        if (a) {
+          state.avail = { by_size: a.by_size, by_color: a.by_color };
+          state.finalAvail = a.total_available; state.finalGood = a.final_good; state.already = a.already_dispatched;
+          Object.entries(a.by_size).forEach(([s, v]) => state.sizeBd[s] = v);
+          Object.entries(a.by_color).forEach(([c, v]) => state.colorBd[c] = v);
+          infoLine.style.display = ""; infoLine.innerHTML = "";
+          const note = a.already_dispatched > 0 ? ` (QC-passed ${a.final_good}, already dispatched ${a.already_dispatched})` : "";
+          infoLine.append(el("strong", {}, "Available to dispatch: "), `${a.total_available} good piece(s)${note}. Edit the size/colour boxes below — ship all or part; the rest stays in inventory.`);
+        }
+      } else { infoLine.style.display = "none"; }
+      renderDims();
     }
 
     const form = el("div", { class: "form-inline" }, [
       field("Order (finished)", selectEl({ onchange: e => onOrder(e.target.value) },
         ORDERS.map(o => ({ value: o.id, label: o.order_label })), state.order, "Select order")),
       field("Challan Number", el("input", { type: "text", value: state.challan, placeholder: "e.g. CH-2026-001", oninput: e => state.challan = e.target.value })),
-      field("Quantity to Dispatch", qtyInput),
     ]);
+
     const submit = async () => {
       err.style.display = "none";
-      if (!state.order) { err.textContent = "Select an order."; err.style.display = "block"; return; }
-      if (!state.quantity || Number(state.quantity) <= 0) { err.textContent = "Enter a quantity to dispatch."; err.style.display = "block"; return; }
-      if (state.finalQty != null && Number(state.quantity) > state.finalQty) { err.textContent = `Only ${state.finalQty} pieces are available (passed QC).`; err.style.display = "block"; return; }
+      if (!state.order || !state.avail) { err.textContent = "Select an order."; err.style.display = "block"; return; }
+      const total = Object.values(state.sizeBd).reduce((s, v) => s + Number(v || 0), 0);
+      if (total <= 0) { err.textContent = "Enter at least 1 piece to dispatch."; err.style.display = "block"; return; }
+      for (const [s, a] of Object.entries(state.avail.by_size)) if (Number(state.sizeBd[s] || 0) > a) { err.textContent = `Only ${a} '${s}' piece(s) passed QC — you entered ${state.sizeBd[s]}.`; err.style.display = "block"; return; }
+      for (const [c, a] of Object.entries(state.avail.by_color)) if (Number(state.colorBd[c] || 0) > a) { err.textContent = `Only ${a} '${c}' piece(s) available — you entered ${state.colorBd[c]}.`; err.style.display = "block"; return; }
+      const colorTotal = Object.values(state.colorBd).reduce((s, v) => s + Number(v || 0), 0);
+      if (total !== colorTotal) { err.textContent = `Size total (${total}) and colour total (${colorTotal}) must match.`; err.style.display = "block"; return; }
+      const sizeBd = Object.fromEntries(Object.entries(state.sizeBd).filter(([, v]) => Number(v) > 0).map(([k, v]) => [k, Number(v)]));
+      const colorBd = Object.fromEntries(Object.entries(state.colorBd).filter(([, v]) => Number(v) > 0).map(([k, v]) => [k, Number(v)]));
       try {
         await apiPost("/finishing/dispatch/", {
-          order: Number(state.order), quantity_dispatched: Number(state.quantity), status: "DISPATCHED",
+          order: Number(state.order), quantity_dispatched: total, status: "DISPATCHED",
           dispatch_date: new Date().toISOString().slice(0, 10), challan_number: state.challan || "",
-          size_breakdown: state.sizeBd, color_breakdown: state.colorBd,
+          size_breakdown: sizeBd, color_breakdown: colorBd,
         });
-        notify.success("Order dispatched.");
-        state = { order: "", quantity: "", finalQty: null, challan: "", sizeBd: {}, colorBd: {} };
+        notify.success(`Dispatched ${total} piece(s).`);
+        state = { order: "", challan: "", sizeBd: {}, colorBd: {}, avail: null, finalAvail: 0, finalGood: 0, already: 0, _remS: {}, _remC: {} };
         await load();
       } catch (e) { err.textContent = e.message; err.style.display = "block"; }
     };
+    submitBtn.onclick = submit;
+
     wrap.appendChild(el("div", { class: "card" }, [
       el("h3", {}, "🚚 Dispatch an Order"),
-      err, form, finalLine, breakdownWrap,
-      el("div", { class: "form-inline", style: "margin-top:0.8rem;" }, [el("button", { type: "button", onclick: submit }, "Dispatch")]),
+      err, form, infoLine, dimWrap,
+      el("div", { class: "form-inline", style: "margin-top:0.8rem;" }, [submitBtn]),
     ]));
     if (state.order) onOrder(state.order);
   }

@@ -1,0 +1,254 @@
+{% extends "frontend/base.html" %}
+{% block title %}Parties - GMS{% endblock %}
+{% block content %}
+  <h2 class="page-title">Parties — 360° View</h2>
+  <p class="page-subtitle">Every customer at a glance — receivables, payments, ageing, orders and the fabric they've supplied — with charts and a full statement drill-down for each party.</p>
+
+  <div class="grid grid-4" id="party-kpi"></div>
+
+  <div class="grid grid-2">
+    <div class="card"><h3>📊 Outstanding Receivable by Party</h3><p class="card-subtitle">Who owes the most, right now.</p><div id="chart-outstanding" class="muted">Loading…</div></div>
+    <div class="card"><h3>🥯 Receivables Split</h3><p class="card-subtitle">Received vs still outstanding, across all customers.</p><div id="chart-donut" class="muted">Loading…</div></div>
+  </div>
+  <div class="card">
+    <h3>🧵 Customer-Supplied Fabric — Remaining by Party</h3>
+    <p class="card-subtitle">For customers who supplied their own fabric: how much is still in the factory.</p>
+    <div id="chart-fabric" class="muted">Loading…</div>
+  </div>
+
+  <div class="card">
+    <h3>👥 All Parties</h3>
+    <p class="card-subtitle">Click <strong>View</strong> for a customer's complete statement, ageing and fabric detail.</p>
+    <div id="parties-table" class="muted">Loading…</div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  Auth.guardPage(["ADMIN"]);
+  renderShell("admin-parties", "Parties");
+
+  // Validated categorical palette (green / blue / brand) — CVD-safe. Magnitude
+  // bars use a single hue; the donut uses two well-separated hues + labels.
+  const GREEN = "#1a7f4b", BLUE = "#0369a1", BRAND = "#e66239", RED = "#b3261e", AMBER = "#b4690e";
+  const money = v => fmtMoney(v);
+
+  function kpiTile(icon, label, value, tone, sub) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? RED : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.8rem;padding:1.1rem 1.2rem;" }, [
+      el("div", { style: "font-size:1.7rem;" }, icon),
+      el("div", {}, [
+        el("div", { class: "value", style: `font-size:1.45rem;color:${c};` }, value),
+        el("div", { class: "label" }, label),
+        sub ? el("div", { class: "muted", style: "font-size:0.72rem;margin-top:0.12rem;" }, sub) : null,
+      ].filter(Boolean)),
+    ]);
+  }
+
+  // Horizontal magnitude bars — thin marks, rounded ends, direct value labels, hover title.
+  function hbars(rows, color, fmt) {
+    if (!rows.length) return el("p", { class: "muted" }, "No data.");
+    const max = Math.max(1, ...rows.map(r => Number(r.value) || 0));
+    return el("div", {}, rows.map(r => {
+      const v = Number(r.value) || 0, pct = Math.round(v / max * 100);
+      return el("div", { style: "display:flex;align-items:center;gap:0.6rem;margin:0.4rem 0;" }, [
+        el("div", { style: "width:150px;font-size:0.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", title: r.label }, r.label),
+        el("div", { style: "flex:1;height:15px;border-radius:4px;background:#f0eeeb;overflow:hidden;", title: `${r.label}: ${fmt(v)}` }, [
+          el("div", { style: `height:100%;width:${pct}%;background:${color};border-radius:4px;transition:width .5s ease;` })]),
+        el("strong", { style: "width:95px;text-align:right;font-size:0.82rem;" }, fmt(v)),
+      ]);
+    }));
+  }
+
+  // SVG donut diagram with a 2px gap between segments, legend + labels.
+  function donut(segments, colors) {
+    const total = segments.reduce((s, x) => s + (Number(x.value) || 0), 0) || 1;
+    const ns = "http://www.w3.org/2000/svg", R = 62, r = 40, cx = 72, cy = 72, gap = 0.03;
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 144 144"); svg.setAttribute("width", "160"); svg.setAttribute("height", "160");
+    let a0 = -Math.PI / 2;
+    segments.forEach((seg, i) => {
+      const frac = (Number(seg.value) || 0) / total;
+      if (frac <= 0) return;
+      const a1 = a0 + frac * 2 * Math.PI, large = (a1 - a0) > Math.PI ? 1 : 0;
+      const g = frac < 0.02 ? 0 : gap;
+      const p = document.createElementNS(ns, "path");
+      const xo0 = cx + R * Math.cos(a0 + g), yo0 = cy + R * Math.sin(a0 + g);
+      const xo1 = cx + R * Math.cos(a1 - g), yo1 = cy + R * Math.sin(a1 - g);
+      const xi1 = cx + r * Math.cos(a1 - g), yi1 = cy + r * Math.sin(a1 - g);
+      const xi0 = cx + r * Math.cos(a0 + g), yi0 = cy + r * Math.sin(a0 + g);
+      p.setAttribute("d", `M${xo0} ${yo0} A${R} ${R} 0 ${large} 1 ${xo1} ${yo1} L${xi1} ${yi1} A${r} ${r} 0 ${large} 0 ${xi0} ${yi0} Z`);
+      p.setAttribute("fill", colors[i % colors.length]);
+      const t = document.createElementNS(ns, "title"); t.textContent = `${seg.label}: ${money(seg.value)} (${Math.round(frac * 100)}%)`; p.appendChild(t);
+      svg.appendChild(p);
+      a0 = a1;
+    });
+    const legend = el("div", { style: "display:flex;flex-direction:column;gap:0.4rem;" },
+      segments.map((seg, i) => el("div", { style: "display:flex;align-items:center;gap:0.45rem;font-size:0.85rem;" }, [
+        el("span", { style: `width:12px;height:12px;border-radius:3px;background:${colors[i % colors.length]};display:inline-block;` }),
+        el("span", {}, `${seg.label}`),
+        el("strong", { style: "margin-left:auto;" }, `${money(seg.value)} · ${Math.round((Number(seg.value) || 0) / total * 100)}%`),
+      ])));
+    return el("div", { style: "display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap;" }, [svg, el("div", { style: "flex:1;min-width:200px;" }, [legend])]);
+  }
+
+  // ---------- statement drill-down ----------
+  const AGE = [["0-30", "0–30 days", GREEN], ["31-60", "31–60 days", AMBER], ["61-90", "61–90 days", BRAND], ["90+", "90+ days", RED]];
+  function ageingBars(ageing) {
+    const total = AGE.reduce((s, [k]) => s + Number(ageing[k] || 0), 0);
+    if (!total) return el("p", { class: "muted" }, "Nothing outstanding — fully settled. 🎉");
+    return el("div", {}, AGE.map(([k, lbl, col]) => {
+      const v = Number(ageing[k] || 0), pct = total ? Math.round(v / total * 100) : 0;
+      return el("div", { style: "margin:0.4rem 0;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;font-size:0.83rem;margin-bottom:0.2rem;" }, [el("span", {}, lbl), el("strong", { style: v ? `color:${col};` : "color:#9aa0aa;" }, money(v))]),
+        el("div", { style: "height:8px;border-radius:5px;background:#f0eeeb;overflow:hidden;" }, [el("div", { style: `height:100%;width:${pct}%;background:${col};border-radius:5px;` })]),
+      ]);
+    }));
+  }
+
+  async function viewStatement(row) {
+    const body = el("div", { class: "muted" }, "Loading…");
+    showCrudModal(`📑 ${row.name}`, [body], [el("button", { class: "secondary", type: "button", onclick: closeCrudModal }, "Close")], { wide: true });
+    try {
+      const [s, fabricReport] = await Promise.all([
+        apiGet(`/accounts/party-statement/?party=${row.id}`),
+        apiGet("/accounts/report/?key=party-fabric").catch(() => ({ rows: [] })),
+      ]);
+      const info = s.party, closing = Number(s.summary.closing || 0);
+      const fabric = (fabricReport.rows || []).find(f => f.party === row.name);
+      body.innerHTML = "";
+
+      body.appendChild(el("div", { class: "card", style: "margin-bottom:1rem;" }, [
+        el("div", { style: "display:flex;justify-content:space-between;flex-wrap:wrap;gap:1rem;" }, [
+          el("div", {}, [
+            el("h3", { style: "margin:0 0 .3rem;" }, info.name),
+            el("div", { class: "muted", style: "font-size:.85rem;line-height:1.6;" }, [
+              el("div", {}, `Code: ${info.code}  ·  Contact: ${info.contact_person}`),
+              el("div", {}, `📞 ${info.phone}   ✉️ ${info.email}`),
+              info.pan_vat !== "—" ? el("div", {}, `PAN/VAT: ${info.pan_vat}`) : null,
+              info.credit_terms !== "—" ? el("div", {}, `Credit terms: ${info.credit_terms} · Limit ${money(info.credit_limit)}`) : null,
+              info.address !== "—" ? el("div", {}, `📍 ${info.address}`) : null,
+            ].filter(Boolean)),
+          ]),
+          el("div", { style: "text-align:right;" }, [
+            el("div", { class: "muted", style: "font-size:.75rem;" }, `As of ${s.as_of}`),
+            el("div", { style: `font-size:1.5rem;font-weight:800;color:${closing > 0 ? RED : GREEN};` }, money(closing)),
+            el("div", { class: "muted", style: "font-size:.8rem;" }, closing > 0 ? "Receivable (owes us)" : "Settled"),
+          ]),
+        ]),
+      ]));
+
+      body.appendChild(el("div", { class: "grid grid-4", style: "margin-bottom:1rem;" }, [
+        kpiTile("🧾", "Total Billed", money(s.summary.total_debit), "info"),
+        kpiTile("💵", "Total Received", money(s.summary.total_credit), "good"),
+        kpiTile(closing > 0 ? "⏳" : "✅", "Outstanding", money(closing), closing > 0 ? "bad" : "good"),
+        kpiTile("📊", "Recovery", s.summary.total_debit ? Math.round(s.summary.total_credit / s.summary.total_debit * 100) + "%" : "—", "info"),
+      ]));
+
+      const ledger = el("div", {});
+      if (s.entries.length) {
+        const head = el("tr", {}, ["Date", "Voucher", "Particulars", "Debit", "Credit", "Balance"].map((h, i) => el("th", { style: `padding:.4rem .5rem;border-bottom:2px solid #eee;font-size:.76rem;text-align:${i >= 3 ? "right" : "left"};` }, h)));
+        const rows = s.entries.map(e => el("tr", {}, [
+          el("td", { style: "padding:.3rem .5rem;font-size:.79rem;white-space:nowrap;" }, e.date),
+          el("td", { style: "padding:.3rem .5rem;font-size:.79rem;" }, e.voucher),
+          el("td", { style: "padding:.3rem .5rem;font-size:.79rem;" }, e.particulars),
+          el("td", { style: `padding:.3rem .5rem;font-size:.79rem;text-align:right;color:${e.debit ? RED : "#ccc"};` }, e.debit ? money(e.debit) : "—"),
+          el("td", { style: `padding:.3rem .5rem;font-size:.79rem;text-align:right;color:${e.credit ? GREEN : "#ccc"};` }, e.credit ? money(e.credit) : "—"),
+          el("td", { style: "padding:.3rem .5rem;font-size:.79rem;text-align:right;font-weight:700;" }, money(e.balance)),
+        ]));
+        ledger.appendChild(el("div", { style: "overflow-x:auto;" }, [el("table", { style: "width:100%;border-collapse:collapse;" }, [el("thead", {}, [head]), el("tbody", {}, rows)])]));
+      } else ledger.appendChild(el("p", { class: "muted" }, "No ledger entries yet."));
+
+      const pays = el("div", {});
+      if (s.payments.length) s.payments.forEach(p => pays.appendChild(el("div", { style: "display:flex;justify-content:space-between;align-items:center;padding:.35rem 0;border-bottom:1px solid #f2f0ed;" }, [
+        el("div", {}, [el("div", { style: "font-weight:600;font-size:.84rem;" }, money(p.amount)), el("div", { class: "muted", style: "font-size:.74rem;" }, `${p.date} · ${p.method} · ${p.reference}`)]),
+        el("span", { style: `color:${GREEN};` }, "✓")])));
+      else pays.appendChild(el("p", { class: "muted" }, "No payments yet."));
+
+      body.appendChild(el("div", { style: "display:grid;grid-template-columns:1.6fr 1fr;gap:1rem;align-items:start;" }, [
+        el("div", { class: "card" }, [el("h4", { style: "margin:0 0 .5rem;" }, "Running-Balance Ledger"), ledger]),
+        el("div", {}, [
+          el("div", { class: "card", style: "margin-bottom:1rem;" }, [el("h4", { style: "margin:0 0 .5rem;" }, "Ageing of Outstanding"), ageingBars(s.ageing)]),
+          el("div", { class: "card" }, [el("h4", { style: "margin:0 0 .5rem;" }, "Payment History"), pays]),
+        ]),
+      ]));
+
+      if (fabric && fabric.detail && fabric.detail.length) {
+        const ft = el("div", {});
+        dataTable(ft, {
+          columns: [
+            { label: "Fabric", key: "fabric" }, { label: "Roll", key: "roll" },
+            { label: "Supplied", num: true, value: r => r.supplied, render: r => `${r.supplied} ${r.unit}` },
+            { label: "Used", num: true, value: r => r.used, render: r => `${r.used} ${r.unit}` },
+            { label: "Remaining", num: true, value: r => r.remaining, render: r => el("strong", {}, `${r.remaining} ${r.unit}`) },
+          ], rows: fabric.detail, pageSize: 6, searchable: false, emptyText: "No fabric.",
+        });
+        body.appendChild(el("div", { class: "card", style: "margin-top:1rem;" }, [el("h4", { style: "margin:0 0 .5rem;" }, "🧵 Fabric Supplied by this Customer"), ft]));
+      }
+    } catch (e) { body.innerHTML = `<p class="error-msg">Could not load: ${e.message}</p>`; }
+  }
+
+  async function load() {
+    let statement, fabric, orders;
+    try {
+      [statement, fabric, orders] = await Promise.all([
+        apiGet("/accounts/party-statement/"),
+        apiGet("/accounts/report/?key=party-fabric").catch(() => ({ rows: [] })),
+        fetchAll("/orders/").catch(() => []),
+      ]);
+    } catch (e) {
+      document.getElementById("parties-table").innerHTML = `<p class="error-msg">${e.message}</p>`; return;
+    }
+    const parties = statement.parties || [];
+    const fabByName = {}; (fabric.rows || []).forEach(f => fabByName[f.party] = f);
+    const orderCount = {}; orders.forEach(o => { orderCount[o.party_name] = (orderCount[o.party_name] || 0) + 1; });
+    const rows = parties.map(p => ({ ...p, orders: orderCount[p.name] || 0,
+      fabric_supplied: fabByName[p.name] ? fabByName[p.name].supplied : 0,
+      fabric_remaining: fabByName[p.name] ? fabByName[p.name].remaining : 0 }));
+
+    // KPIs
+    const tBilled = rows.reduce((s, p) => s + p.billed, 0);
+    const tRecv = rows.reduce((s, p) => s + p.received, 0);
+    const tOut = rows.reduce((s, p) => s + p.outstanding, 0);
+    const tFabRem = rows.reduce((s, p) => s + p.fabric_remaining, 0);
+    const kpi = document.getElementById("party-kpi"); kpi.innerHTML = "";
+    kpi.append(
+      kpiTile("👥", "Customers", String(rows.length), "info"),
+      kpiTile("🧾", "Total Billed", money(tBilled), "info"),
+      kpiTile("💵", "Total Received", money(tRecv), "good"),
+      kpiTile("⏳", "Outstanding", money(tOut), tOut > 0 ? "bad" : "good", `${rows.filter(p => p.outstanding > 0).length} owing`));
+
+    // Chart: outstanding by party (top 8)
+    const outRows = rows.filter(p => p.outstanding > 0).sort((a, b) => b.outstanding - a.outstanding).slice(0, 8)
+      .map(p => ({ label: p.name, value: p.outstanding }));
+    const oc = document.getElementById("chart-outstanding"); oc.innerHTML = "";
+    oc.appendChild(outRows.length ? hbars(outRows, BRAND, money) : el("p", { class: "muted" }, "🎉 No outstanding receivables — all customers settled."));
+
+    // Donut: received vs outstanding
+    const dc = document.getElementById("chart-donut"); dc.innerHTML = "";
+    dc.appendChild(donut([{ label: "Received", value: tRecv }, { label: "Outstanding", value: tOut }], [GREEN, BRAND]));
+
+    // Chart: fabric remaining by party
+    const fabRows = rows.filter(p => p.fabric_remaining > 0).sort((a, b) => b.fabric_remaining - a.fabric_remaining).slice(0, 8)
+      .map(p => ({ label: p.name, value: p.fabric_remaining }));
+    const fc = document.getElementById("chart-fabric"); fc.innerHTML = "";
+    fc.appendChild(fabRows.length ? hbars(fabRows, BLUE, v => v + " m") : el("p", { class: "muted" }, "No customer-supplied fabric on hand."));
+
+    // Table
+    const tbl = document.getElementById("parties-table"); tbl.innerHTML = "";
+    dataTable(tbl, {
+      columns: [
+        { label: "Customer", key: "name" },
+        { label: "Orders", num: true, value: p => p.orders, render: p => String(p.orders) },
+        { label: "Billed", num: true, value: p => p.billed, render: p => money(p.billed) },
+        { label: "Received", num: true, value: p => p.received, render: p => el("span", { style: `color:${GREEN};` }, money(p.received)) },
+        { label: "Outstanding", num: true, value: p => p.outstanding, render: p => el("strong", { style: `color:${p.outstanding > 0 ? RED : GREEN};` }, money(p.outstanding)) },
+        { label: "Fabric Supplied", num: true, value: p => p.fabric_supplied, render: p => (p.fabric_supplied ? p.fabric_supplied + " m" : "—") },
+        { label: "Fabric Left", num: true, value: p => p.fabric_remaining, render: p => (p.fabric_remaining ? el("span", { style: `color:${BLUE};` }, p.fabric_remaining + " m") : "—") },
+        { label: "", sortable: false, render: p => el("button", { class: "secondary", type: "button", onclick: () => viewStatement(p) }, "View") },
+      ], rows, pageSize: 12, initialSort: { key: "outstanding", dir: "desc" }, searchPlaceholder: "Search customers…", emptyText: "No parties yet.",
+    });
+  }
+  load();
+</script>
+{% endblock %}

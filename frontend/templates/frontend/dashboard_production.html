@@ -26,8 +26,9 @@
 
 {% block scripts %}
 <script>
-  Auth.guardPage(["PRODUCTION_SUPERVISOR"]);
+  Auth.guardPage(["ADMIN", "PRODUCTION_SUPERVISOR"]);
   renderShell("production", "Production");
+  const GREEN = "#1a7f4b", BLUE = "#0369a1", RED = "#b3261e", AMBER = "#b4690e";
 
   const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
     el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
@@ -63,13 +64,14 @@
     cards.appendChild(stat("Out for Processing", outPieces.toLocaleString() + " pcs"));
     cards.appendChild(stat("Pending Payouts", pendingIncome.length, pendingIncome.length ? "danger" : "success"));
 
-    // Assignment status breakdown
+    // Assignment status breakdown — donut diagram
     const sb = document.getElementById("status-breakdown"); sb.innerHTML = "";
     const counts = {};
     assignments.forEach(a => { counts[a.status] = (counts[a.status] || 0) + 1; });
-    const rows = Object.entries(counts).map(([s, c]) => ({ status: s, count: c }));
-    if (rows.length) dataTable(sb, { columns: [{ label: "Status", key: "status", render: r => badge(r.status) }, { label: "Assignments", key: "count", value: r => r.count }], rows, pageSize: 8, searchable: false });
-    else sb.textContent = "No assignments yet.";
+    if (Object.keys(counts).length) {
+      const col = { ASSIGNED: AMBER, IN_PROGRESS: BLUE, COMPLETED: GREEN, QUALITY_CHECKED: "#0891b2", RETURNED: RED };
+      sb.appendChild(dashDonut(Object.entries(counts).map(([s, c]) => ({ label: s.replace("_", " "), value: c, color: col[s] || "#6d4aff" }))));
+    } else sb.textContent = "No assignments yet.";
 
     // Out for processing
     const po = document.getElementById("processing-out"); po.innerHTML = "";
@@ -89,12 +91,21 @@
       opMap.set(a.operator_name, g);
     });
     const opRows = [...opMap.values()].map(g => ({ ...g, efficiency: g.issued ? Math.round(((g.returned - g.defects) / g.issued) * 1000) / 10 : 0 }));
-    if (opRows.length) dataTable(oo, { columns: [
+    if (opRows.length) {
+      // Bar diagram: pieces produced per operator (top 8) + a detail table.
+      const barRows = [...opRows].sort((a, b) => b.returned - a.returned).slice(0, 8).map(g => ({ label: g.operator || "—", value: g.returned, color: BLUE }));
+      const tableBox = el("div", {});
+      oo.append(
+        el("div", { class: "section-title", style: "margin-top:0;" }, "Pieces produced per operator"),
+        dashBars(barRows),
+        el("div", { class: "section-title" }, "Detail"),
+        tableBox);
+      dataTable(tableBox, { columns: [
         { label: "Operator", key: "operator" }, { label: "Bundles", key: "bundles", value: r => r.bundles },
         { label: "Issued", key: "issued", value: r => r.issued }, { label: "Returned", key: "returned", value: r => r.returned },
         { label: "Defects", key: "defects", value: r => r.defects }, { label: "Efficiency", value: r => r.efficiency, render: r => r.efficiency + "%" },
       ], rows: opRows, pageSize: 8, initialSort: { key: "returned", dir: "desc" }, searchPlaceholder: "Search operators…" });
-    else oo.textContent = "No operator activity yet.";
+    } else oo.textContent = "No operator activity yet.";
   }
   loadStats();
 </script>

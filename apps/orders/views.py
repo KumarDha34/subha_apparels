@@ -91,8 +91,8 @@ def compute_order_loss(order):
         for k in qc_totals:
             qc_totals[k] += row.get(k, 0)
 
-    dispatch = Dispatch.objects.filter(order=order).first()
-    dispatched = dispatch.quantity_dispatched if (dispatch and dispatch.quantity_dispatched) else None
+    disp_qs = Dispatch.objects.filter(order=order)
+    dispatched = sum(d.quantity_dispatched or 0 for d in disp_qs) if disp_qs.exists() else None
     good_pieces = dispatched if dispatched is not None else max(prod_returned - finishing_lost, 0)
     total_lost = (cutting_lost or 0) + production_lost + finishing_lost
 
@@ -217,8 +217,7 @@ class OrderViewSet(viewsets.ModelViewSet):
         finishing_rejected = (
             FinishingQualityCheck.objects.filter(order=order).aggregate(q=Sum("quantity_rejected"))["q"] or 0
         )
-        dispatch = Dispatch.objects.filter(order=order).first()
-        dispatched = dispatch.quantity_dispatched if dispatch and dispatch.quantity_dispatched else 0
+        dispatched = sum(d.quantity_dispatched or 0 for d in Dispatch.objects.filter(order=order))
 
         return Response({
             "order_number": order.order_number,

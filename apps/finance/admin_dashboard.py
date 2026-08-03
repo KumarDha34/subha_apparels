@@ -46,8 +46,7 @@ def _order_cost(order):
     for ra in ReworkAssignment.objects.filter(qc__order=order, status=ReworkAssignment.Status.COMPLETED):
         labor += (ra.returned_quantity or 0) * (ra.rate_per_piece or Decimal("0"))
     processing = sum((pd.cost for pd in ProcessDispatch.objects.filter(order=order) if pd.cost), Decimal("0"))
-    disp = Dispatch.objects.filter(order=order).first()
-    transport = disp.transport_cost if disp and disp.transport_cost else Decimal("0")
+    transport = sum((d.transport_cost or Decimal("0")) for d in Dispatch.objects.filter(order=order)) or Decimal("0")
     charges = sum((c.amount for c in OrderAdditionalCharge.objects.filter(order=order)), Decimal("0"))
     total = fabric + accessory + labor + processing + transport + charges
     income = IncomeRecord.objects.filter(order=order).aggregate(t=Sum("amount"))["t"] or Decimal("0")

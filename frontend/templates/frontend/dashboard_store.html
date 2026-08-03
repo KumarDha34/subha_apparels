@@ -6,6 +6,12 @@
 
   <div class="grid grid-4" id="stat-cards"></div>
 
+  <div class="grid grid-2">
+    <div class="card"><h3>🔄 Stock Movements</h3><p class="card-subtitle">Receipts, issues, wastage and returns (by quantity).</p><div id="movements" class="muted">Loading…</div></div>
+    <div class="card"><h3>🧵 Fabric On Hand (by type)</h3><p class="card-subtitle">Available quantity per fabric.</p><div id="stock-by-type" class="muted">Loading…</div></div>
+  </div>
+  <div class="card"><h3>⚠️ Low / Out of Stock</h3><div id="low-stock" class="muted">Loading…</div></div>
+
   <div class="card">
     <div class="crud-header">
       <h3>🔔 Notifications</h3>
@@ -33,13 +39,52 @@
 
 {% block scripts %}
 <script>
-  Auth.guardPage(["STORE_MANAGER"]);
+  Auth.guardPage(["ADMIN", "STORE_MANAGER"]);
   renderShell("store", "Store");
+  const GREEN = "#1a7f4b", BLUE = "#0369a1", RED = "#b3261e", AMBER = "#b4690e";
 
   function statCard(label, value, kind) {
     return el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
       el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
     ]);
+  }
+
+  async function loadCharts() {
+    const [stock, low, fabTxn, accTxn] = await Promise.all([
+      fetchAll("/store/fabric-stock/").catch(() => []),
+      apiGet("/store/fabric-stock/low_stock/").catch(() => []),
+      fetchAll("/store/transactions/").catch(() => []),
+      fetchAll("/store/accessory-transactions/").catch(() => []),
+    ]);
+    // Movements donut — sum quantity by transaction type across fabric + accessory
+    const mv = {};
+    [...fabTxn, ...accTxn].forEach(t => { mv[t.transaction_type] = (mv[t.transaction_type] || 0) + Number(t.quantity || 0); });
+    document.getElementById("movements").replaceChildren(dashDonut([
+      { label: "Receipts", value: Math.round(mv.RECEIPT || 0), color: GREEN },
+      { label: "Issued", value: Math.round(mv.ISSUE || 0), color: BLUE },
+      { label: "Returns", value: Math.round(mv.RETURN || 0), color: AMBER },
+      { label: "Wastage", value: Math.round(mv.WASTAGE || 0), color: RED },
+    ]));
+    // Fabric on hand by type/colour (top 8)
+    const byType = {};
+    stock.forEach(s => {
+      const k = `${s.fabric_type_name || "—"}/${s.color_name || "—"}`;
+      byType[k] = (byType[k] || 0) + Number(s.available_quantity || 0);
+    });
+    const rows = Object.entries(byType).map(([label, value]) => ({ label, value: Math.round(value * 10) / 10, color: BLUE, fmt: v => v + " m" }))
+      .sort((a, b) => b.value - a.value).slice(0, 8);
+    document.getElementById("stock-by-type").replaceChildren(rows.length ? dashBars(rows) : el("p", { class: "muted" }, "No fabric stock."));
+    // Low / out of stock
+    const lw = document.getElementById("low-stock"); lw.innerHTML = "";
+    if (!low.length) lw.appendChild(el("p", { class: "muted" }, "All stock above reorder level. 🎉"));
+    else dataTable(lw, {
+      columns: [
+        { label: "Fabric", sortable: false, render: s => `${s.fabric_type_name || "—"}/${s.color_name || "—"}` },
+        { label: "Available", num: true, value: s => Number(s.available_quantity || 0), render: s => `${s.available_quantity || 0} ${s.unit === "METERS" ? "m" : (s.unit || "").toLowerCase()}` },
+        { label: "Reorder Level", num: true, value: s => Number(s.reorder_level || 0), render: s => String(s.reorder_level || 0) },
+        { label: "Status", sortable: false, render: s => badge(Number(s.available_quantity || 0) <= 0 ? "Out of Stock" : "Low") },
+      ], rows: low, pageSize: 8, searchable: false, emptyText: "None.",
+    });
   }
 
   async function loadOverview() {
@@ -124,5 +169,6 @@
 
   loadOverview();
   loadNotifications();
+  loadCharts();
 </script>
 {% endblock %}

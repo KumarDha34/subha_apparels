@@ -295,8 +295,7 @@ def r_dispatch_balance():
     rows = []
     for o in Order.objects.select_related("party").exclude(status="CANCELLED"):
         ordered = OrderItemColorSize.objects.filter(order_item_color__order_item__order=o).aggregate(s=Sum("quantity"))["s"] or 0
-        d = Dispatch.objects.filter(order=o).first()
-        dispatched = (d.quantity_dispatched or 0) if d else 0
+        dispatched = sum(d.quantity_dispatched or 0 for d in Dispatch.objects.filter(order=o))
         in_store = FinishedGoodsReceipt.objects.filter(order=o).aggregate(s=Sum("quantity"))["s"] or 0
         income = IncomeRecord.objects.filter(order=o).aggregate(s=Sum("amount"))["s"] or 0
         rows.append({"order": o.order_number, "party": o.party.name if o.party_id else "—",
@@ -516,9 +515,111 @@ def r_piece_loss():
                 rows=rows)
 
 
+def r_piece_trail():
+    """Every piece's full journey per order, broken down by SIZE and by COLOUR:
+    operator-returned -> process loss -> QC pass/fail -> dispatched -> remaining
+    inventory. Gives complete traceability of where each piece went."""
+    from collections import defaultdict
+    from apps.orders.models import Order
+    from apps.finishing.models import FinishingQualityCheck, Dispatch
+    from apps.operators.services import order_piece_breakdown
+
+    detail_cols = [
+        {"key": "dim", "label": "Size / Colour"}, {"key": "returned", "label": "Operator Returned"},
+        {"key": "to_qc", "label": "Reached QC"}, {"key": "process_loss", "label": "Process Loss"},
+        {"key": "qc_passed", "label": "QC Passed"}, {"key": "qc_failed", "label": "QC Failed"},
+        {"key": "dispatched", "label": "Dispatched"}, {"key": "remaining", "label": "Remaining"},
+    ]
+    rows = []
+    for o in Order.objects.select_related("party").exclude(status="CANCELLED"):
+        bd = order_piece_breakdown(o.id)  # operator-returned, by size & colour
+        cs, ps, fs = defaultdict(int), defaultdict(int), defaultdict(int)   # checked/passed/failed by size
+        cc, pc, fc = defaultdict(int), defaultdict(int), defaultdict(int)   # ... by colour
+        for qc in FinishingQualityCheck.objects.filter(order=o).select_related("color", "size"):
+            s = qc.size.name if qc.size_id else "—"
+            c = qc.color.name if qc.color_id else "—"
+            cs[s] += qc.quantity_checked; ps[s] += qc.final_good; fs[s] += qc.quantity_rejected + qc.quantity_reworked_failed
+            cc[c] += qc.quantity_checked; pc[c] += qc.final_good; fc[c] += qc.quantity_rejected + qc.quantity_reworked_failed
+        ds, dc = defaultdict(int), defaultdict(int)   # dispatched by size / colour
+        for d in Dispatch.objects.filter(order=o):
+            for k, v in (d.size_breakdown or {}).items(): ds[k] += int(v or 0)
+            for k, v in (d.color_breakdown or {}).items(): dc[k] += int(v or 0)
+
+        detail = []
+        for s in sorted(set(list(bd["by_size"]) + list(ps) + list(ds))):
+            ret, toqc, passed = bd["by_size"].get(s, 0), cs.get(s, 0), ps.get(s, 0)
+            detail.append({"dim": f"Size {s}", "returned": ret, "to_qc": toqc,
+                           "process_loss": max(ret - toqc, 0) if toqc else 0, "qc_passed": passed,
+                           "qc_failed": fs.get(s, 0), "dispatched": ds.get(s, 0), "remaining": max(passed - ds.get(s, 0), 0)})
+        for c in sorted(set(list(bd["by_color"]) + list(pc) + list(dc))):
+            ret, toqc, passed = bd["by_color"].get(c, 0), cc.get(c, 0), pc.get(c, 0)
+            detail.append({"dim": f"Colour {c}", "returned": ret, "to_qc": toqc,
+                           "process_loss": max(ret - toqc, 0) if toqc else 0, "qc_passed": passed,
+                           "qc_failed": fc.get(c, 0), "dispatched": dc.get(c, 0), "remaining": max(passed - dc.get(c, 0), 0)})
+
+        t_ret, t_pass, t_disp = bd["total"], sum(ps.values()), sum(ds.values())
+        rows.append({"order": o.order_number, "party": o.party.name if o.party_id else "—",
+                     "returned": t_ret, "qc_passed": t_pass, "dispatched": t_disp,
+                     "remaining": max(t_pass - t_disp, 0),
+                     "accuracy": (f"{round(t_disp / t_pass * 100)}%" if t_pass else "—"),
+                     "status": o.status, "detail": detail,
+                     "detail_title": f"Piece trail — {o.order_number}", "detail_columns": detail_cols})
+    return dict(title="Piece Trail (by Size & Colour)",
+                description="Every piece's journey per order — operator returned, process loss, QC pass/fail, "
+                            "dispatched and remaining inventory, by size and colour. Click a row for the full breakdown.",
+                columns=[col("order", "Order"), col("party", "Party"), col("returned", "Returned"),
+                         col("qc_passed", "QC Passed"), col("dispatched", "Dispatched"), col("remaining", "Remaining"),
+                         col("accuracy", "Dispatch Accuracy"), col("status", "Status", "badge")],
+                rows=rows)
+
+
+def r_party_fabric():
+    """Party-wise fabric tracking: for every customer who supplied fabric, how
+    much they supplied, how much has been used (issued to cutting), returned,
+    wasted, and how much remains -- with a roll-by-roll breakdown."""
+    from apps.master_data.models import Party
+    from apps.store.models import FabricStock
+
+    detail_cols = [
+        {"key": "fabric", "label": "Fabric"}, {"key": "roll", "label": "Roll"},
+        {"key": "supplied", "label": "Supplied"}, {"key": "used", "label": "Used"},
+        {"key": "returned", "label": "Returned"}, {"key": "wastage", "label": "Wastage"},
+        {"key": "remaining", "label": "Remaining"}, {"key": "unit", "label": "Unit"},
+    ]
+    rows = []
+    for p in Party.objects.filter(supplied_fabric_stocks__isnull=False).distinct():
+        stocks = FabricStock.objects.filter(supplied_by_party=p).select_related("fabric_type", "color")
+        t_sup = t_use = t_ret = t_waste = t_rem = 0.0
+        detail = []
+        for st in stocks:
+            txns = list(st.transactions.all())
+            supplied = sum(_m(t.quantity) for t in txns if t.transaction_type == "RECEIPT")
+            used = sum(_m(t.quantity) for t in txns if t.transaction_type == "ISSUE")
+            ret = sum(_m(t.quantity) for t in txns if t.transaction_type == "RETURN")
+            waste = sum(_m(t.quantity) for t in txns if t.transaction_type == "WASTAGE")
+            remaining = _m(st.available_quantity)
+            fabric = f"{getattr(st.fabric_type, 'name', '?')}/{getattr(st.color, 'name', '?')}"
+            detail.append({"fabric": fabric, "roll": st.roll_number or "—", "supplied": round(supplied, 2),
+                           "used": round(used, 2), "returned": round(ret, 2), "wastage": round(waste, 2),
+                           "remaining": round(remaining, 2), "unit": st.unit})
+            t_sup += supplied; t_use += used; t_ret += ret; t_waste += waste; t_rem += remaining
+        rows.append({"party": p.name, "rolls": stocks.count(), "supplied": round(t_sup, 2), "used": round(t_use, 2),
+                     "returned": round(t_ret, 2), "wastage": round(t_waste, 2), "remaining": round(t_rem, 2),
+                     "detail": detail, "detail_title": f"Fabric supplied by {p.name}", "detail_columns": detail_cols})
+    rows.sort(key=lambda r: -r["remaining"])
+    return dict(title="Party-wise Fabric Tracking",
+                description="For each customer who supplied fabric: supplied vs used (issued to cutting), returned, "
+                            "wasted and remaining. Click a row for the roll-by-roll detail.",
+                summary=[{"label": "Customer Fabric Remaining", "value": round(sum(r["remaining"] for r in rows), 2), "kind": "info"}],
+                columns=[col("party", "Customer"), col("rolls", "Rolls"), col("supplied", "Supplied"),
+                         col("used", "Used"), col("returned", "Returned"), col("wastage", "Wastage"),
+                         col("remaining", "Remaining")],
+                rows=rows)
+
+
 REPORTS = {
     "orders-products": r_orders_products, "style-master": r_style_master, "product-overview": r_product_overview,
-    "piece-loss": r_piece_loss,
+    "piece-loss": r_piece_loss, "piece-trail": r_piece_trail, "party-fabric": r_party_fabric,
     "product-gallery": r_product_gallery, "product-pnl": r_product_pnl, "cutting-entry": r_cutting_entry,
     "stitching-entry": r_stitching_entry, "finishing-entry": r_finishing_entry, "store-entry": r_store_entry,
     "operator-overview": r_operator_overview, "quality-report": r_quality_report, "fabric-wastage": r_fabric_wastage,

@@ -18,6 +18,7 @@ urlpatterns = [
     # Admin-only extra screens.
     path("dashboard/kpi/", views.page_view, {"page": "dashboard_kpi"}, name="dashboard-kpi"),
     path("reports/", views.page_view, {"page": "admin_report"}, name="admin-report"),
+    path("parties/", views.page_view, {"page": "admin_parties"}, name="admin-parties"),
     path("masters/", views.page_view, {"page": "masters"}, name="masters"),
     path("users/", views.page_view, {"page": "users"}, name="users"),
 

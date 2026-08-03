@@ -12,20 +12,93 @@
   Auth.guardPage(["MERCHANDISE"]);
   renderShell("merch-parties", "Parties");
 
+  const pct = (v, total) => (total ? ` (${(v / total * 100).toFixed(1)}%)` : "");
+  // Coloured status pill: In Stock / Partial Used / All Used.
+  function statusPill(status) {
+    const map = { "In Stock": "#0369a1", "Partial Used": "#b4690e", "All Used": "#1a7f4b" };
+    const bg = map[status] || "#5b6472";
+    return el("span", { style: `display:inline-block;padding:.12rem .55rem;border-radius:999px;font-size:.72rem;font-weight:700;color:#fff;background:${bg};` }, status || "—");
+  }
+
+  // Customer-supplied fabric: one card per fabric with supplied/used/wastage/
+  // returned/remaining (+%), a status badge, and a by-order breakdown table.
+  // Shows ALL supplied fabric — including rolls still sitting unused in store.
+  function renderFabricTracking(list) {
+    if (!list || !list.length) return el("p", { class: "muted" }, "No customer-supplied fabric for this party.");
+    return el("div", {}, list.map(f => {
+      const u = f.unit === "METERS" ? "m" : (f.unit || "").toLowerCase();
+      const lines = detailGrid([
+        ["Supplied", `${f.supplied} ${u}`],
+        ["Used", `${f.used} ${u}${pct(f.used, f.supplied)}`],
+        ["Wastage", `${f.wastage} ${u}${pct(f.wastage, f.supplied)}`],
+        ["Returned", `${f.returned} ${u}${pct(f.returned, f.supplied)}`],
+        ["Remaining", f.remaining <= 0.001 ? `0 ${u} — all accounted ✓` : `${f.remaining} ${u}${pct(f.remaining, f.supplied)}`],
+      ]);
+      const orderTbl = el("div", {});
+      if (f.by_order && f.by_order.length) {
+        dataTable(orderTbl, {
+          columns: [
+            { label: "Order", key: "order" },
+            { label: "Supplied", num: true, value: r => r.supplied, render: r => `${r.supplied} ${u}` },
+            { label: "Used", num: true, value: r => r.used, render: r => `${r.used} ${u}` },
+            { label: "Wastage", num: true, value: r => r.wastage, render: r => `${r.wastage} ${u}` },
+            { label: "Returned", num: true, value: r => r.returned, render: r => `${r.returned} ${u}` },
+            { label: "Remaining", num: true, value: r => r.remaining, render: r => `${r.remaining} ${u}` },
+          ], rows: f.by_order, pageSize: 6, searchable: false, emptyText: "—",
+        });
+      }
+      return el("div", { class: "subcard", style: "padding:0.9rem 1rem;border:1px solid var(--border,#e7e0da);border-radius:12px;margin-bottom:0.7rem;" }, [
+        el("div", { style: "display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin-bottom:0.4rem;" }, [
+          el("div", { style: "font-weight:700;" }, `🧵 ${f.fabric}`), statusPill(f.status)]),
+        lines,
+        f.by_order && f.by_order.length ? el("div", { class: "section-title", style: "margin-top:0.6rem;" }, "By Order") : null,
+        orderTbl,
+      ].filter(Boolean));
+    }));
+  }
+
+  function renderAccessoryTracking(list) {
+    if (!list || !list.length) return el("p", { class: "muted" }, "No customer-supplied accessories for this party.");
+    const box = el("div", {});
+    dataTable(box, {
+      columns: [
+        { label: "Accessory", key: "accessory" },
+        { label: "Type", key: "type" },
+        { label: "Supplied", num: true, value: r => r.supplied, render: r => `${r.supplied}${r.unit ? " " + r.unit.toLowerCase() : ""}` },
+        { label: "Used", num: true, value: r => r.used, render: r => String(r.used) },
+        { label: "Remaining", num: true, value: r => r.remaining, render: r => el("strong", {}, String(r.remaining)) },
+        { label: "Status", sortable: false, render: r => statusPill(r.status) },
+      ], rows: list, pageSize: 12, searchable: false, emptyText: "None.",
+    });
+    return box;
+  }
+
   async function viewParty(party, close) {
     const ordersBox = el("div", { class: "muted" }, "Loading orders...");
     const summaryBox = el("div", { class: "muted" }, "Loading summary...");
+    const fabricBox = el("div", { class: "muted" }, "Loading fabric…");
+    const accBox = el("div", { class: "muted" }, "Loading accessories…");
     showCrudModal(`👤 ${party.name}`, [
+      el("div", { class: "section-title" }, "Customer Details"),
       detailGrid([
+        ["Name", party.name || "—"],
+        ["Code Prefix", party.code_prefix || "—"],
         ["Contact Person", party.contact_person || "—"],
         ["Phone", party.phone || "—"],
         ["Email", party.email || "—"],
+        ["PAN / VAT No.", party.pan_vat || "—"],
+        ["Credit Terms", party.credit_terms || "—"],
+        ["Credit Limit", party.credit_limit != null ? fmtMoney(party.credit_limit) : "—"],
         ["Status", badge(party.is_active ? "Active" : "Inactive")],
       ]),
       detailRow("Address", party.address || "—"),
-      el("div", { class: "section-title" }, "Summary"),
+      el("div", { class: "section-title" }, "Order & Production Summary"),
       summaryBox,
-      el("div", { class: "section-title" }, "Order History"),
+      el("div", { class: "section-title" }, "🧵 Fabric Tracking (Customer Supplied)"),
+      fabricBox,
+      el("div", { class: "section-title" }, "🧷 Accessory Tracking (Customer Supplied)"),
+      accBox,
+      el("div", { class: "section-title" }, "📜 Order History"),
       ordersBox,
     ], [el("button", { class: "secondary", type: "button", onclick: close }, "Close")], { wide: true });
 
@@ -43,19 +116,15 @@
         ["Pieces Lost", String(s.pieces_lost)],
         ["Total Defects", String(s.total_defects)],
       ]));
-      if (s.operators.length) {
-        const table = el("table");
-        table.appendChild(el("thead", {}, el("tr", {}, ["Operator", "Bundles", "Pieces Issued", "Pieces Returned"].map(h => el("th", {}, h)))));
-        const tbody = el("tbody");
-        s.operators.forEach(o => tbody.appendChild(el("tr", {}, [
-          el("td", {}, o.operator__name || "—"), el("td", {}, String(o.bundles)),
-          el("td", {}, String(o.pieces_issued || 0)), el("td", {}, String(o.pieces_returned || 0)),
-        ])));
-        table.appendChild(tbody);
-        summaryBox.appendChild(el("div", { style: "margin-top:0.75rem;overflow-x:auto;" }, table));
-      }
+      
+      // ✅ OPERATOR SECTION REMOVED
+      
+      // fabric + accessory tracking come from the same summary payload
+      fabricBox.innerHTML = ""; fabricBox.appendChild(renderFabricTracking(s.fabric_tracking));
+      accBox.innerHTML = ""; accBox.appendChild(renderAccessoryTracking(s.accessory_tracking));
     } catch (e) {
       summaryBox.textContent = "Could not load summary: " + e.message;
+      fabricBox.textContent = "—"; accBox.textContent = "—";
     }
 
     try {

@@ -2,9 +2,19 @@
 {% block title %}Cutting - GMS{% endblock %}
 {% block content %}
   <h2 class="page-title">Cutting Dashboard</h2>
-  <p class="page-subtitle">Overview of fabric receiving, cutting progress, and bundles sent to Production.</p>
+  <p class="page-subtitle">Fabric receiving, cutting progress, wastage and bundles sent to Production — at a glance.</p>
 
   <div class="grid grid-4" id="stat-cards"></div>
+
+  <div class="grid grid-2">
+    <div class="card"><h3>🧭 Cutting Pipeline</h3><p class="card-subtitle">Where every cutting order stands.</p><div id="pipeline" class="muted">Loading…</div></div>
+    <div class="card"><h3>🧵 Fabric Efficiency</h3><p class="card-subtitle">How issued fabric was used, wasted, returned or left.</p><div id="fabric" class="muted">Loading…</div></div>
+  </div>
+
+  <div class="card">
+    <h3>✂️ Active Cutting Orders</h3>
+    <div id="active" class="muted">Loading…</div>
+  </div>
 
   <div class="card">
     <h3>Quick Links</h3>
@@ -18,25 +28,92 @@
 
 {% block scripts %}
 <script>
-  Auth.guardPage(["CUTTING_SUPERVISOR"]);
+  Auth.guardPage(["ADMIN", "CUTTING_SUPERVISOR"]);
   renderShell("cutting", "Cutting");
 
-  async function loadStats() {
-    const cards = document.getElementById("stat-cards");
-    const stat = (label, value, kind) => el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
-      el("div", { class: "value" }, String(value)), el("div", { class: "label" }, label),
-    ]);
-    try {
-      const orders = await fetchAll("/cutting/cutting-orders/");
-      const today = new Date().toISOString().slice(0, 10);
-      cards.appendChild(stat("Awaiting Receipt", orders.filter(c => c.status === "FABRIC_ISSUED").length, "warning"));
-      cards.appendChild(stat("In Cutting", orders.filter(c => c.status === "CUTTING").length, "warning"));
-      cards.appendChild(stat("Completed Today", orders.filter(c => c.status === "COMPLETED" && c.updated_at && c.updated_at.slice(0, 10) === today).length, "success"));
-      cards.appendChild(stat("Blocked (Don't Cut)", orders.filter(c => c.average_status === "DONT_CUT" && !c.average_override_approved).length, "danger"));
-      const totalWastage = orders.reduce((s, c) => s + Number(c.wastage_quantity || 0), 0);
-      cards.appendChild(stat("Total Wastage", totalWastage.toFixed(2)));
-    } catch (e) {}
+  const GREEN = "#1a7f4b", BLUE = "#0369a1", BRAND = "#e66239", RED = "#b3261e", AMBER = "#b4690e";
+  function tile(icon, label, value, tone) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? RED : tone === "warn" ? AMBER : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.7rem;padding:1rem 1.1rem;" }, [
+      el("div", { style: "font-size:1.5rem;" }, icon),
+      el("div", {}, [el("div", { class: "value", style: `font-size:1.35rem;color:${c};` }, String(value)), el("div", { class: "label" }, label)])]);
   }
-  loadStats();
+  // Labelled horizontal bars (status/magnitude), direct-labeled.
+  function bars(rows) {
+    const max = Math.max(1, ...rows.map(r => r.value));
+    return el("div", {}, rows.map(r => el("div", { style: "display:flex;align-items:center;gap:0.6rem;margin:0.4rem 0;" }, [
+      el("div", { style: "width:140px;font-size:0.83rem;" }, r.label),
+      el("div", { style: "flex:1;height:14px;border-radius:4px;background:#f0eeeb;overflow:hidden;", title: `${r.label}: ${r.value}` }, [
+        el("div", { style: `height:100%;width:${Math.round(r.value / max * 100)}%;background:${r.color};border-radius:4px;` })]),
+      el("strong", { style: "width:70px;text-align:right;font-size:0.83rem;" }, r.fmt ? r.fmt(r.value) : String(r.value))])));
+  }
+  // Single stacked bar showing a composition (used/wastage/returned/remaining).
+  function stacked(parts) {
+    const total = parts.reduce((s, p) => s + p.value, 0) || 1;
+    const bar = el("div", { style: "display:flex;height:22px;border-radius:6px;overflow:hidden;background:#f0eeeb;" },
+      parts.filter(p => p.value > 0).map(p => el("div", { style: `width:${(p.value / total * 100).toFixed(1)}%;background:${p.color};`, title: `${p.label}: ${p.value} (${Math.round(p.value / total * 100)}%)` })));
+    const legend = el("div", { style: "display:flex;flex-wrap:wrap;gap:0.7rem;margin-top:0.5rem;" },
+      parts.map(p => el("span", { style: "display:inline-flex;align-items:center;gap:0.3rem;font-size:0.8rem;" }, [
+        el("span", { style: `width:10px;height:10px;border-radius:2px;background:${p.color};display:inline-block;` }),
+        el("span", { class: "muted" }, `${p.label} ${p.value} (${Math.round(p.value / total * 100)}%)`)])));
+    return el("div", {}, [bar, legend]);
+  }
+
+  async function load() {
+    let orders;
+    try { orders = await fetchAll("/cutting/cutting-orders/"); }
+    catch (e) { document.getElementById("stat-cards").innerHTML = `<p class="error-msg">${e.message}</p>`; return; }
+    const today = new Date().toISOString().slice(0, 10);
+    const byStatus = k => orders.filter(c => c.status === k).length;
+    const issued = orders.reduce((s, c) => s + Number(c.fabric_issued_quantity || 0), 0);
+    const used = orders.reduce((s, c) => s + Number(c.fabric_used_quantity || 0), 0);
+    const wastage = orders.reduce((s, c) => s + Number(c.wastage_quantity || 0), 0);
+    const returned = orders.reduce((s, c) => s + Number(c.returned_quantity || 0), 0);
+    const remaining = Math.max(issued - used - wastage - returned, 0);
+    const pieces = orders.reduce((s, c) => s + Number(c.total_pieces_cut || 0), 0);
+    const blocked = orders.filter(c => c.average_status === "DONT_CUT" && !c.average_override_approved).length;
+
+    const cards = document.getElementById("stat-cards"); cards.innerHTML = "";
+    cards.append(
+      tile("📥", "Awaiting Receipt", byStatus("FABRIC_ISSUED"), "warn"),
+      tile("✂️", "In Cutting", byStatus("CUTTING"), "info"),
+      tile("✅", "Completed Today", orders.filter(c => c.status === "COMPLETED" && c.updated_at && c.updated_at.slice(0, 10) === today).length, "good"),
+      tile("⛔", "Blocked (Don't Cut)", blocked, blocked ? "bad" : "good"),
+      tile("🧵", "Pieces Cut", pieces, "info"),
+      tile("♻️", "Wastage", wastage.toFixed(1) + " m", wastage ? "warn" : "good"),
+      tile("📦", "Cutting Orders", orders.length, "info"),
+      tile("📈", "Fabric Efficiency", issued ? Math.round(used / issued * 100) + "%" : "—", "good"));
+
+    document.getElementById("pipeline").replaceChildren(bars([
+      { label: "Pending", value: byStatus("PENDING"), color: AMBER },
+      { label: "Fabric Issued", value: byStatus("FABRIC_ISSUED"), color: BLUE },
+      { label: "In Cutting", value: byStatus("CUTTING"), color: BRAND },
+      { label: "Completed", value: byStatus("COMPLETED"), color: GREEN },
+    ]));
+
+    document.getElementById("fabric").replaceChildren(
+      el("p", { class: "muted", style: "margin:0 0 0.5rem;" }, `Total issued: ${issued.toFixed(1)} m`),
+      stacked([
+        { label: "Used", value: +used.toFixed(1), color: GREEN },
+        { label: "Wastage", value: +wastage.toFixed(1), color: RED },
+        { label: "Returned", value: +returned.toFixed(1), color: BLUE },
+        { label: "Remaining", value: +remaining.toFixed(1), color: AMBER },
+      ]));
+
+    const active = orders.filter(c => ["PENDING", "FABRIC_ISSUED", "CUTTING"].includes(c.status));
+    const wrap = document.getElementById("active"); wrap.innerHTML = "";
+    if (!active.length) wrap.appendChild(el("p", { class: "muted" }, "No active cutting orders — all caught up. 🎉"));
+    else dataTable(wrap, {
+      columns: [
+        { label: "Cut #", key: "cutting_number" },
+        { label: "Order", key: "order_number", render: c => c.order_number || "—" },
+        { label: "Fabric", sortable: false, render: c => `${c.fabric_type_name || "—"}/${c.color_name || "—"}` },
+        { label: "Issued", num: true, value: c => Number(c.fabric_issued_quantity || 0), render: c => `${c.fabric_issued_quantity || 0} m` },
+        { label: "Remaining", num: true, value: c => Number(c.remaining_quantity || 0), render: c => `${c.remaining_quantity || 0} m` },
+        { label: "Status", value: c => c.status, render: c => badge(c.status) },
+      ], rows: active, pageSize: 8, initialSort: { key: "cutting_number", dir: "desc" }, searchPlaceholder: "Search…", emptyText: "None.",
+    });
+  }
+  load();
 </script>
 {% endblock %}

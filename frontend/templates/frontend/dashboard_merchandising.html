@@ -11,6 +11,11 @@
 
   <div class="grid grid-4" id="stat-cards"></div>
 
+  <div class="grid grid-2">
+    <div class="card"><h3>🧭 Order Pipeline</h3><p class="card-subtitle">Where every order stands right now.</p><div id="pipeline" class="muted">Loading…</div></div>
+    <div class="card"><h3>👥 Orders by Customer</h3><p class="card-subtitle">Top customers by order count.</p><div id="by-party" class="muted">Loading…</div></div>
+  </div>
+
   <div class="card">
     <h3>Recent Orders</h3>
     <div id="recent-orders" class="muted">Loading...</div>
@@ -19,14 +24,15 @@
 
 {% block scripts %}
 <script>
-  Auth.guardPage(["MERCHANDISE"]);
+  Auth.guardPage(["ADMIN", "MERCHANDISE"]);
   renderShell("merch-dashboard", "Merchandising");
+  const GREEN = "#1a7f4b", BLUE = "#0369a1", BRAND = "#e66239", AMBER = "#b4690e";
 
-  function statCard(label, value, kind) {
-    return el("div", { class: `card stat ${kind ? "stat-" + kind : ""}` }, [
-      el("div", { class: "value" }, String(value)),
-      el("div", { class: "label" }, label),
-    ]);
+  function tile(icon, label, value, tone) {
+    const c = tone === "good" ? GREEN : tone === "bad" ? "#b3261e" : tone === "warn" ? AMBER : tone === "info" ? BLUE : "var(--text,#1b2233)";
+    return el("div", { class: "card stat", style: "display:flex;align-items:center;gap:0.7rem;padding:1rem 1.1rem;" }, [
+      el("div", { style: "font-size:1.5rem;" }, icon),
+      el("div", {}, [el("div", { class: "value", style: `font-size:1.35rem;color:${c};` }, String(value)), el("div", { class: "label" }, label)])]);
   }
 
   async function loadOverview() {
@@ -36,11 +42,36 @@
       const orders = data.results || data;
       const byStatus = {};
       orders.forEach(o => { byStatus[o.status] = (byStatus[o.status] || 0) + 1; });
+      const active = orders.filter(o => ["CONFIRMED", "IN_CUTTING", "IN_PRODUCTION", "IN_FINISHING"].includes(o.status)).length;
+      const samplesPending = orders.filter(o => o.order_category === "SAMPLE" && (o.sample_status === "PENDING" || !o.sample_status)).length;
+      const month = new Date().toISOString().slice(0, 7);
+      const thisMonth = orders.filter(o => (o.order_date || "").slice(0, 7) === month).length;
 
-      cards.appendChild(statCard("Total Orders", data.count ?? orders.length));
-      cards.appendChild(statCard("Draft", byStatus.DRAFT || 0, "warning"));
-      cards.appendChild(statCard("Confirmed", byStatus.CONFIRMED || 0));
-      cards.appendChild(statCard("Dispatched", byStatus.DISPATCHED || 0, "success"));
+      cards.innerHTML = "";
+      cards.append(
+        tile("📦", "Total Orders", data.count ?? orders.length, "info"),
+        tile("📝", "Draft", byStatus.DRAFT || 0, "warn"),
+        tile("⚙️", "In Progress", active, "info"),
+        tile("🚚", "Dispatched", (byStatus.DISPATCHED || 0) + (byStatus.INVOICED || 0) + (byStatus.PAID || 0), "good"),
+        tile("🧵", "Samples Pending", samplesPending, samplesPending ? "warn" : "good"),
+        tile("🗓️", "New This Month", thisMonth, "info"),
+        tile("✅", "Paid", byStatus.PAID || 0, "good"),
+        tile("❌", "Cancelled", byStatus.CANCELLED || 0, byStatus.CANCELLED ? "bad" : "good"));
+
+      // Pipeline diagram
+      document.getElementById("pipeline").replaceChildren(dashBars([
+        { label: "Draft", value: byStatus.DRAFT || 0, color: AMBER },
+        { label: "Confirmed", value: byStatus.CONFIRMED || 0, color: BLUE },
+        { label: "In Cutting", value: byStatus.IN_CUTTING || 0, color: "#6d4aff" },
+        { label: "In Production", value: byStatus.IN_PRODUCTION || 0, color: BRAND },
+        { label: "In Finishing", value: byStatus.IN_FINISHING || 0, color: "#0891b2" },
+        { label: "Dispatched+", value: (byStatus.DISPATCHED || 0) + (byStatus.INVOICED || 0) + (byStatus.PAID || 0), color: GREEN },
+      ]));
+
+      // Orders by customer (top 8)
+      const pc = {}; orders.forEach(o => { if (o.party_name) pc[o.party_name] = (pc[o.party_name] || 0) + 1; });
+      const partyRows = Object.entries(pc).map(([label, value]) => ({ label, value, color: BLUE })).sort((a, b) => b.value - a.value).slice(0, 8);
+      document.getElementById("by-party").replaceChildren(partyRows.length ? dashBars(partyRows) : el("p", { class: "muted" }, "No orders yet."));
 
       const recent = document.getElementById("recent-orders");
       recent.innerHTML = "";
@@ -62,7 +93,7 @@
         recent.appendChild(el("div", { style: "margin-top:0.9rem;" }, el("a", { class: "btn secondary", href: "/merchandising/orders/" }, "View all orders →")));
       }
     } catch (e) {
-      cards.appendChild(statCard("Total Orders", "—"));
+      cards.appendChild(tile("📦", "Total Orders", "—", "info"));
       document.getElementById("recent-orders").textContent = "Unavailable.";
     }
   }

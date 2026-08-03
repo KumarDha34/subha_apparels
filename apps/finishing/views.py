@@ -132,6 +132,23 @@ class DispatchViewSet(viewsets.ModelViewSet):
     required_roles = ["ADMIN", "FINISHING_SUPERVISOR"]
     filterset_fields = ["status", "order"]
 
+    @action(detail=False, methods=["get"])
+    def availability(self, request):
+        """GET ?order=<id>. What's available to dispatch RIGHT NOW, by size and
+        by colour: QC-passed minus already-dispatched. The dispatch form uses
+        this to auto-fill and to validate live as the user types."""
+        from apps.orders.models import Order
+        order = Order.objects.filter(pk=request.query_params.get("order")).first()
+        if not order:
+            return Response({"detail": "Order not found."}, status=404)
+        avail = DispatchSerializer.available_by_dimension(order)
+        total_available, final_good, already = DispatchSerializer.available_to_dispatch(order)
+        return Response({
+            "order_number": order.order_number,
+            "total_available": total_available, "final_good": final_good, "already_dispatched": already,
+            **avail,
+        })
+
 
 class FinishingOperationViewSet(viewsets.ModelViewSet):
     queryset = FinishingOperation.objects.select_related("order", "vendor", "recorded_by").all().order_by("-created_at")

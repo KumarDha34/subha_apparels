@@ -65,10 +65,12 @@ const MENU = [
   { key: "production-bundle-allocation", label: "Stitching Entry", href: "/production/bundle-allocation/", icon: "\u{1F9F5}", roles: ["ADMIN"], adminNav: true, section: "Operations" },
   { key: "finishing-operations", label: "Finishing Entry", href: "/finishing/operations/", icon: "\u{2728}", roles: ["ADMIN"], adminNav: true, section: "Operations" },
   { key: "store-stock", label: "Store Entry", href: "/store/stock/", icon: "\u{1F4E6}", roles: ["ADMIN"], adminNav: true, section: "Operations" },
+  { key: "admin-parties", label: "Party", href: "/parties/", icon: "\u{1F465}", roles: ["ADMIN"], adminNav: true, section: "Operations" },
   { key: "finishing-dispatch", label: "Dispatch & Balance", href: "/finishing/dispatch/", icon: "\u{1F69A}", roles: ["ADMIN"], adminNav: true, section: "Operations" },
   // ---- Quality & Loss ----
   { key: "report-quality-report", label: "Quality Report", href: "/reports/?key=quality-report", icon: "\u{1F50D}", roles: ["ADMIN"], adminNav: true, section: "Quality & Loss" },
   { key: "report-piece-loss", label: "Piece Loss Tracking", href: "/reports/?key=piece-loss", icon: "\u{1F4C9}", roles: ["ADMIN"], adminNav: true, section: "Quality & Loss" },
+  { key: "report-piece-trail", label: "Piece Trail (Size/Colour)", href: "/reports/?key=piece-trail", icon: "\u{1F9F5}", roles: ["ADMIN"], adminNav: true, section: "Quality & Loss" },
   { key: "report-fabric-wastage", label: "Fabric Wastage", href: "/reports/?key=fabric-wastage", icon: "\u{267B}\u{FE0F}", roles: ["ADMIN"], adminNav: true, section: "Quality & Loss" },
   // ---- People & System ----
   { key: "production-operators", label: "Operator Overview", href: "/production/operators/", icon: "\u{1F9D1}\u{200D}\u{1F3ED}", roles: ["ADMIN"], adminNav: true, section: "People & System" },
@@ -763,6 +765,42 @@ function renderTrendBars(rows, labelKey, valueKey, opts = {}) {
     ]);
   });
   return el("div", { class: "trend-bars" }, bars);
+}
+
+/** Horizontal magnitude bars for department dashboards. rows: [{label,value,color,fmt?}] */
+function dashBars(rows) {
+  if (!rows.length) return el("p", { class: "muted" }, "No data yet.");
+  const max = Math.max(1, ...rows.map(r => Number(r.value) || 0));
+  return el("div", {}, rows.map(r => el("div", { style: "display:flex;align-items:center;gap:0.6rem;margin:0.4rem 0;" }, [
+    el("div", { style: "width:150px;font-size:0.83rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", title: r.label }, r.label),
+    el("div", { style: "flex:1;height:14px;border-radius:4px;background:#f0eeeb;overflow:hidden;", title: `${r.label}: ${r.value}` }, [
+      el("div", { style: `height:100%;width:${Math.round((Number(r.value) || 0) / max * 100)}%;background:${r.color || "#e66239"};border-radius:4px;transition:width .5s ease;` })]),
+    el("strong", { style: "width:90px;text-align:right;font-size:0.83rem;" }, r.fmt ? r.fmt(r.value) : String(r.value))])));
+}
+
+/** SVG donut + legend for department dashboards. segments: [{label,value,color}] */
+function dashDonut(segments) {
+  const total = segments.reduce((s, x) => s + (Number(x.value) || 0), 0);
+  const ns = "http://www.w3.org/2000/svg", R = 60, r = 38, cx = 70, cy = 70, gap = 0.03;
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 140 140"); svg.setAttribute("width", "150"); svg.setAttribute("height", "150");
+  let a0 = -Math.PI / 2;
+  segments.forEach(seg => {
+    const frac = total ? (Number(seg.value) || 0) / total : 0; if (frac <= 0) return;
+    const a1 = a0 + frac * 2 * Math.PI, large = (a1 - a0) > Math.PI ? 1 : 0, g = frac < 0.02 ? 0 : gap;
+    const p = document.createElementNS(ns, "path");
+    const xo0 = cx + R * Math.cos(a0 + g), yo0 = cy + R * Math.sin(a0 + g), xo1 = cx + R * Math.cos(a1 - g), yo1 = cy + R * Math.sin(a1 - g);
+    const xi1 = cx + r * Math.cos(a1 - g), yi1 = cy + r * Math.sin(a1 - g), xi0 = cx + r * Math.cos(a0 + g), yi0 = cy + r * Math.sin(a0 + g);
+    p.setAttribute("d", `M${xo0} ${yo0} A${R} ${R} 0 ${large} 1 ${xo1} ${yo1} L${xi1} ${yi1} A${r} ${r} 0 ${large} 0 ${xi0} ${yi0} Z`);
+    p.setAttribute("fill", seg.color);
+    const t = document.createElementNS(ns, "title"); t.textContent = `${seg.label}: ${seg.value} (${Math.round(frac * 100)}%)`; p.appendChild(t);
+    svg.appendChild(p); a0 = a1;
+  });
+  const legend = el("div", { style: "display:flex;flex-direction:column;gap:0.35rem;" },
+    segments.map(s => el("div", { style: "display:flex;align-items:center;gap:0.45rem;font-size:0.84rem;" }, [
+      el("span", { style: `width:12px;height:12px;border-radius:3px;background:${s.color};display:inline-block;` }),
+      el("span", {}, s.label), el("strong", { style: "margin-left:auto;" }, `${s.value} · ${total ? Math.round((Number(s.value) || 0) / total * 100) : 0}%`)])));
+  return el("div", { style: "display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap;" }, [svg, el("div", { style: "flex:1;min-width:180px;" }, [legend])]);
 }
 
 /** Label/value row for read-only detail views -- full width, for longer

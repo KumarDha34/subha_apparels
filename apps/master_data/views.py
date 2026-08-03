@@ -72,6 +72,92 @@ class PartyViewSet(BaseMasterViewSet):
             .order_by("-bundles")
         )
 
+        # ---- Customer-supplied FABRIC tracking (ALL supplied, even unused) ----
+        # Supplied (+ the order it was supplied FOR) comes from the customer's
+        # own purchase orders, so fabric still sitting in store with zero usage
+        # is still shown. Consumption (used/wastage/returned) is layered in from
+        # the cutting orders that drew on it. remaining = supplied - the rest.
+        from apps.finance.models import PurchaseOrder
+        from apps.cutting.models import CuttingOrder
+
+        def _blank(key, unit):
+            return {"fabric": key, "unit": unit or "METERS", "supplied": 0.0,
+                    "used": 0.0, "wastage": 0.0, "returned": 0.0, "by_order": {}}
+
+        def _bo(entry, order_no):
+            return entry["by_order"].setdefault(
+                order_no, {"order": order_no, "supplied": 0.0, "used": 0.0, "wastage": 0.0, "returned": 0.0})
+
+        fabric_map = {}
+        for po in (PurchaseOrder.objects
+                   .filter(party=party, po_type=PurchaseOrder.POType.CUSTOMER_SUPPLIED)
+                   .select_related("related_order").prefetch_related("items__fabric_type", "items__color")):
+            order_no = po.related_order.order_number if po.related_order_id else "— (unassigned)"
+            for it in po.items.all():
+                if it.material_type != "FABRIC":
+                    continue
+                ft = it.fabric_type.name if it.fabric_type_id else "—"
+                cl = it.color.name if it.color_id else "—"
+                key = f"{ft} / {cl}"
+                e = fabric_map.setdefault(key, _blank(key, it.unit))
+                if it.unit and e["unit"] == "METERS":
+                    e["unit"] = it.unit
+                sup = float(it.received_quantity or it.quantity or 0)
+                e["supplied"] += sup
+                _bo(e, order_no)["supplied"] += sup
+
+        for co in (CuttingOrder.objects.filter(fabric_issued__supplied_by_party=party)
+                   .select_related("fabric_issued__fabric_type", "fabric_issued__color", "order")):
+            fs = co.fabric_issued
+            ft = fs.fabric_type.name if fs and fs.fabric_type_id else "—"
+            cl = fs.color.name if fs and fs.color_id else "—"
+            key = f"{ft} / {cl}"
+            e = fabric_map.setdefault(key, _blank(key, fs.unit if fs else "METERS"))
+            used, waste, ret = float(co.fabric_used_quantity or 0), float(co.wastage_quantity or 0), float(co.returned_quantity or 0)
+            e["used"] += used; e["wastage"] += waste; e["returned"] += ret
+            bo = _bo(e, co.order.order_number if co.order_id else "— (unassigned)")
+            bo["used"] += used; bo["wastage"] += waste; bo["returned"] += ret
+
+        def _status(supplied, used, wastage, returned, remaining):
+            if used + wastage + returned <= 0.001:
+                return "In Stock"
+            return "Partial Used" if remaining > 0.001 else "All Used"
+
+        fabric_tracking = []
+        for e in fabric_map.values():
+            e["remaining"] = round(e["supplied"] - e["used"] - e["wastage"] - e["returned"], 2)
+            e["status"] = _status(e["supplied"], e["used"], e["wastage"], e["returned"], e["remaining"])
+            for k in ("supplied", "used", "wastage", "returned"):
+                e[k] = round(e[k], 2)
+            e["by_order"] = sorted(e["by_order"].values(), key=lambda x: x["order"])
+            for bo in e["by_order"]:
+                for k in ("supplied", "used", "wastage", "returned"):
+                    bo[k] = round(bo[k], 2)
+                bo["remaining"] = round(bo["supplied"] - bo["used"] - bo["wastage"] - bo["returned"], 2)
+            fabric_tracking.append(e)
+        fabric_tracking.sort(key=lambda x: x["fabric"])
+
+        # ---- Customer-supplied ACCESSORY tracking (ALL supplied, even unused) ----
+        from apps.store.models import AccessoryStock
+        accessory_tracking = []
+        for a in AccessoryStock.objects.filter(supplied_by_party=party).select_related("accessory"):
+            txns = list(a.transactions.all())
+            supplied = sum(float(t.quantity) for t in txns if t.transaction_type == "RECEIPT")
+            used = sum(float(t.quantity) for t in txns if t.transaction_type == "ISSUE")
+            remaining = round(float(a.available_quantity), 2)
+            acc = a.accessory
+            label = (acc.name if acc else "—")
+            if acc and acc.size_spec:
+                label += f" ({acc.size_spec})"
+            accessory_tracking.append({
+                "accessory": label,
+                "type": acc.get_accessory_type_display() if acc else "—",
+                "unit": (acc.get_unit_display() if acc else ""),
+                "supplied": round(supplied, 2), "used": round(used, 2), "remaining": remaining,
+                "status": _status(supplied, used, 0, 0, remaining),
+            })
+        accessory_tracking.sort(key=lambda x: x["accessory"])
+
         return Response({
             "order_counts": {"total": total_orders, "completed": completed, "cancelled": cancelled, "pending": pending, "by_status": by_status},
             "bundles_total": assignments.values("bundle").distinct().count(),
@@ -80,6 +166,8 @@ class PartyViewSet(BaseMasterViewSet):
             "pieces_lost": pieces_lost,
             "total_defects": assignments.aggregate(d=Sum("defects"))["d"] or 0,
             "operators": operators,
+            "fabric_tracking": fabric_tracking,
+            "accessory_tracking": accessory_tracking,
         })
 
 

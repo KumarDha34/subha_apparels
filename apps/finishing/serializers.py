@@ -152,21 +152,68 @@ class DispatchSerializer(serializers.ModelSerializer):
         already = sum(d.quantity_dispatched or 0 for d in Dispatch.objects.filter(order=order))
         return max(final_good - already, 0), final_good, already
 
+    @staticmethod
+    def available_by_dimension(order, exclude_dispatch_id=None):
+        """QC-passed pieces still available to dispatch, split by size and by
+        colour (final-good per size/colour minus what's already been dispatched
+        for each). Powers the size/colour-wise dispatch validation."""
+        from collections import defaultdict
+        from .models import FinishingQualityCheck
+        pass_size, pass_col = defaultdict(int), defaultdict(int)
+        for qc in FinishingQualityCheck.objects.filter(order=order).select_related("color", "size"):
+            pass_size[qc.size.name if qc.size_id else "—"] += qc.final_good
+            pass_col[qc.color.name if qc.color_id else "—"] += qc.final_good
+        disp_size, disp_col = defaultdict(int), defaultdict(int)
+        for d in Dispatch.objects.filter(order=order):
+            if exclude_dispatch_id and d.id == exclude_dispatch_id:
+                continue
+            for k, v in (d.size_breakdown or {}).items():
+                disp_size[k] += int(v or 0)
+            for k, v in (d.color_breakdown or {}).items():
+                disp_col[k] += int(v or 0)
+        by_size = {s: max(pass_size[s] - disp_size.get(s, 0), 0) for s in pass_size}
+        by_color = {c: max(pass_col[c] - disp_col.get(c, 0), 0) for c in pass_col}
+        return {"by_size": by_size, "by_color": by_color,
+                "passed_by_size": dict(pass_size), "passed_by_color": dict(pass_col),
+                "dispatched_by_size": dict(disp_size), "dispatched_by_color": dict(disp_col)}
+
     def validate(self, attrs):
         # Only guard the quantity when the challan is actually going out.
         order = attrs.get("order") or getattr(self.instance, "order", None)
         status = attrs.get("status", getattr(self.instance, "status", None))
         qty = attrs.get("quantity_dispatched", getattr(self.instance, "quantity_dispatched", None))
-        if order and status == Dispatch.Status.DISPATCHED and qty:
-            available, final_good, already = self.available_to_dispatch(order)
-            # On update, the current record's own quantity shouldn't count against itself.
-            if self.instance and self.instance.status == Dispatch.Status.DISPATCHED:
-                available += (self.instance.quantity_dispatched or 0)
-            if int(qty) > available:
-                raise serializers.ValidationError({
-                    "quantity_dispatched": f"Only {available} good piece(s) are available to dispatch "
-                    f"(QC-passed {final_good}, already dispatched {already}). Dispatch that many or fewer — "
-                    f"the rest can go on a later partial shipment."})
+        if not (order and status == Dispatch.Status.DISPATCHED):
+            return attrs
+
+        available, final_good, already = self.available_to_dispatch(order)
+        if self.instance and self.instance.status == Dispatch.Status.DISPATCHED:
+            available += (self.instance.quantity_dispatched or 0)
+        if qty and int(qty) > available:
+            raise serializers.ValidationError({
+                "quantity_dispatched": f"Only {available} good piece(s) are available to dispatch "
+                f"(QC-passed {final_good}, already dispatched {already}). Dispatch that many or fewer — "
+                f"the rest can go on a later partial shipment."})
+
+        # Size/colour-wise: you can't dispatch more of any size/colour than passed QC.
+        avail = self.available_by_dimension(order, exclude_dispatch_id=self.instance.id if self.instance else None)
+        sb = attrs.get("size_breakdown", getattr(self.instance, "size_breakdown", {}) or {}) or {}
+        cb = attrs.get("color_breakdown", getattr(self.instance, "color_breakdown", {}) or {}) or {}
+        for s, v in sb.items():
+            if int(v or 0) > avail["by_size"].get(s, 0):
+                raise serializers.ValidationError({"size_breakdown":
+                    f"Only {avail['by_size'].get(s, 0)} '{s}' piece(s) passed QC and are available — you entered {int(v or 0)}."})
+        for c, v in cb.items():
+            if int(v or 0) > avail["by_color"].get(c, 0):
+                raise serializers.ValidationError({"color_breakdown":
+                    f"Only {avail['by_color'].get(c, 0)} '{c}' piece(s) passed QC and are available — you entered {int(v or 0)}."})
+        # Totals must reconcile with the size breakdown when one is supplied.
+        if sb and qty and sum(int(x or 0) for x in sb.values()) != int(qty):
+            raise serializers.ValidationError({"quantity_dispatched":
+                "Total dispatched must equal the sum of the size-wise quantities."})
+        # Size-wise and colour-wise totals count the same pieces, so they must match.
+        if sb and cb and sum(int(x or 0) for x in sb.values()) != sum(int(x or 0) for x in cb.values()):
+            raise serializers.ValidationError({"color_breakdown":
+                "Size-wise and colour-wise totals must match — they count the same pieces."})
         return attrs
 
     def _advance_if_dispatched(self, dispatch):
@@ -178,20 +225,26 @@ class DispatchSerializer(serializers.ModelSerializer):
 
     def _record_into_store(self, dispatch):
         """Close the loop: a dispatched order's finished garments are logged
-        into Store's finished-goods register (idempotent per order)."""
+        into Store's finished-goods register. With partial shipments the total
+        accumulates across every challan for the order."""
         from django.utils import timezone
         from apps.store.models import FinishedGoodsReceipt
         request = self.context.get("request")
-        FinishedGoodsReceipt.objects.get_or_create(
+        total = sum(d.quantity_dispatched or 0 for d in
+                    Dispatch.objects.filter(order=dispatch.order, status=Dispatch.Status.DISPATCHED))
+        fgr, created = FinishedGoodsReceipt.objects.get_or_create(
             order=dispatch.order,
             defaults={
-                "quantity": dispatch.quantity_dispatched or 0,
+                "quantity": total,
                 "dispatch_reference": dispatch.tracking_number or "",
                 "received_at": timezone.now(),
                 "received_by": getattr(request, "user", None),
-                "remarks": f"Auto-logged from dispatch {dispatch.tracking_number or dispatch.order.order_number}.",
+                "remarks": f"Auto-logged from dispatch(es) of {dispatch.order.order_number}.",
             },
         )
+        if not created and fgr.quantity != total:
+            fgr.quantity = total
+            fgr.save(update_fields=["quantity", "updated_at"])
 
     def create(self, validated_data):
         validated_data["dispatched_by"] = self.context["request"].user

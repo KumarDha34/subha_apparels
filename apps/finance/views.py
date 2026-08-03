@@ -433,8 +433,7 @@ class OrderPnLView(APIView):
                 process_costs[pd.department] += pd.cost
         finishing_cost = sum(process_costs.values(), Decimal("0"))
 
-        dispatch = Dispatch.objects.filter(order=order).first()
-        transport_cost = (dispatch.transport_cost if dispatch and dispatch.transport_cost else Decimal("0"))
+        transport_cost = sum((d.transport_cost or Decimal("0")) for d in Dispatch.objects.filter(order=order)) or Decimal("0")
 
         # Extra, non-material charges (transport, courier, customs, storage,
         # sample, testing, penalties, handling), broken out per charge type.
