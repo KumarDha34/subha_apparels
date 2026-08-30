@@ -116,7 +116,7 @@ STATICFILES_DIRS = [os.path.join(BASE_DIR, "frontend", "static")]
 STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 
 # Turn off WhiteNoise storage parsing to let Vercel route assets smoothly
-STATICFILES_STORAGE = "django.contrib.staticfiles.storage.StaticFilesStorage"
+STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 
 
 MEDIA_URL = "media/"
