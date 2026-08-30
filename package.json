@@ -2,6 +2,6 @@
   "name": "subha-apparels",
   "version": "1.0.0",
   "scripts": {
-    "vercel-build": "python3 manage.py collectstatic --noinput && python3 manage.py migrate --noinput"
+    "vercel-build": "python3 manage.py collectstatic --noinput && python3 manage.py migrate --noinput && echo 'from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser(\"garment@admin.com\", \"garment@admin.com\", \"garment@Admin\") if not User.objects.filter(email=\"garment@admin.com\").exists() else None' | python3 manage.py shell"
   }
 }
