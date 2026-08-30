@@ -6,6 +6,8 @@ echo "🚀 Starting Vercel build process..."
 echo "📦 Installing dependencies..."
 pip install -r requirements.txt
 
+mkdir -p staticfiles
+
 # Collect static files
 echo "📁 Collecting static files..."
 python3 manage.py collectstatic --noinput
