@@ -117,6 +117,8 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Use Django's default storage, not WhiteNoise
 STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
+WHITENOISE_USE_FINDERS = True
+os.makedirs(STATIC_ROOT, exist_ok=True)
 
 
 MEDIA_URL = "media/"

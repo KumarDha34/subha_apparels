@@ -12,7 +12,10 @@
   "routes": [
     {
       "src": "/static/(.*)",
-      "dest": "/staticfiles/$1"
+      "dest": "/staticfiles/$1",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable"
+      }
     },
     {
       "src": "/(.*)",
@@ -23,5 +26,5 @@
     "DJANGO_SETTINGS_MODULE": "config.settings",
     "PYTHONPATH": "."
   },
-  "buildCommand": "python3 manage.py collectstatic --noinput && python3 manage.py migrate --noinput"
+  "buildCommand": "python3 manage.py collectstatic --noinput"
 }
