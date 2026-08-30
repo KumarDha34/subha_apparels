@@ -72,22 +72,20 @@ TEMPLATES = [
         },
     },
 ]
-
+import os
 WSGI_APPLICATION = "config.wsgi.application"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-ACTIVE_DATABASE = config("ACTIVE_DATABASE", default="local")
-
-# If DATABASE_URL is provided (Render), use it
-if config("DATABASE_URL", default=None):
+if DATABASE_URL:
     DATABASES = {
         "default": dj_database_url.config(
-            default=config("DATABASE_URL"),
+            default=DATABASE_URL,
             conn_max_age=600,
             ssl_require=True
         )
     }
 else:
-    # Local PostgreSQL Database
+    # Safe Local Fallback Dev Settings
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
@@ -97,28 +95,6 @@ else:
             "HOST": config("DB_HOST", default="127.0.0.1"),
             "PORT": config("DB_PORT", default="5432"),
         }
-    }
-
-# Optional: Secondary database configurations for advanced use
-# These can be accessed using .using('local') or .using('render')
-if config("DB_NAME_LOCAL", default=None):
-    DATABASES["local"] = {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": config("DB_NAME_LOCAL"),
-        "USER": config("DB_USER_LOCAL", default="postgres"),
-        "PASSWORD": config("DB_PASSWORD_LOCAL", default="postgres"),
-        "HOST": config("DB_HOST_LOCAL", default="127.0.0.1"),
-        "PORT": config("DB_PORT_LOCAL", default="5432"),
-    }
-
-if config("DB_NAME_RENDER", default=None):
-    DATABASES["render"] = {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": config("DB_NAME_RENDER"),
-        "USER": config("DB_USER_RENDER", default="postgres"),
-        "PASSWORD": config("DB_PASSWORD_RENDER", default="postgres"),
-        "HOST": config("DB_HOST_RENDER", default=""),
-        "PORT": config("DB_PORT_RENDER", default="5432"),
     }
 
 AUTH_USER_MODEL = "users.User"
