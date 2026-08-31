@@ -6,6 +6,15 @@ from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
 import dj_database_url
+from dotenv import load_dotenv
+import os
+
+ENVIRONMENT = os.environ.get('ENVIRONMENT', 'local')
+if ENVIRONMENT == 'production':
+    load_dotenv('.env.production')
+else:
+    load_dotenv('.env.local')
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -72,7 +81,6 @@ TEMPLATES = [
         },
     },
 ]
-import os
 WSGI_APPLICATION = "config.wsgi.application"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
