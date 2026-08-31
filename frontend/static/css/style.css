@@ -974,3 +974,85 @@ table td.num, table th.num { text-align: right; }
 [data-theme="dark"] .badge.danger  { background: #2a1416; color: #f7a3a8; }
 [data-theme="dark"] .badge.warning { background: #2a2113; color: #e6c07a; }
 [data-theme="dark"] .badge.info    { background: #10202a; color: #8fd0ea; }
+/* Emergency mobile topbar fix - override everything */
+@media (max-width: 900px) {
+  .topbar {
+    padding: 0 0.6rem !important;
+    gap: 0.3rem !important;
+    height: 52px !important;
+    min-height: 52px !important;
+  }
+  
+  .topbar-left {
+    gap: 0.3rem !important;
+    flex: 1 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+  }
+  
+  .topbar-right {
+    gap: 0.2rem !important;
+    flex-shrink: 0 !important;
+  }
+  
+  #topbar-title {
+    font-size: 0.75rem !important;
+    max-width: 80px !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+  }
+  
+  .sidebar-toggle {
+    font-size: 1rem !important;
+    padding: 0.1rem 0.25rem !important;
+    flex-shrink: 0 !important;
+  }
+  
+  .user-chip .user-meta {
+    display: none !important;
+  }
+  
+  .user-chip {
+    padding: 0.1rem 0.15rem !important;
+    border-radius: 6px !important;
+    gap: 0.2rem !important;
+  }
+  
+  .user-chip .user-avatar {
+    width: 26px !important;
+    height: 26px !important;
+    font-size: 0.55rem !important;
+  }
+  
+  .user-chip .user-caret {
+    display: none !important;
+  }
+  
+  .bell-btn {
+    padding: 0.2rem 0.25rem !important;
+    font-size: 0.85rem !important;
+    border-radius: 6px !important;
+  }
+  
+  .theme-toggle {
+    width: 26px !important;
+    height: 26px !important;
+    font-size: 0.8rem !important;
+    border-radius: 6px !important;
+  }
+  
+  .bell-badge {
+    font-size: 0.45rem !important;
+    min-width: 0.7rem !important;
+    padding: 0.02rem 0.15rem !important;
+    top: -0.15rem !important;
+    right: -0.15rem !important;
+  }
+  
+  .bell-dropdown {
+    right: -5px !important;
+    width: 260px !important;
+    max-width: calc(100vw - 16px) !important;
+  }
+}
