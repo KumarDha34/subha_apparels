@@ -222,6 +222,108 @@ button, .btn {
   text-decoration: none;
   transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.05s ease;
 }
+@media (max-width: 900px) {
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    transform: translateX(-100%);
+    transition: transform 0.28s ease;
+    box-shadow: var(--shadow-lg);
+    width: 280px;
+  }
+  .app-shell.nav-open .sidebar {
+    transform: translateX(0);
+  }
+  .app-shell.nav-open .sidebar-backdrop {
+    display: block;
+  }
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+  .content {
+    padding: 0.8rem 0.8rem 2.5rem;
+  }
+
+  /* ==== FIX: Mobile topbar overlap ==== */
+  .topbar {
+    padding: 0 0.8rem;
+    gap: 0.4rem;
+    height: 56px;
+  }
+  
+  .topbar-left {
+    gap: 0.5rem;
+    min-width: 0;
+    flex: 1;
+  }
+  
+  .topbar-right {
+    gap: 0.3rem;
+    flex-shrink: 0;
+  }
+  
+  #topbar-title {
+    font-size: 0.85rem;
+    max-width: 100px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .sidebar-toggle {
+    flex-shrink: 0;
+    padding: 0.15rem 0.3rem;
+    font-size: 1.1rem;
+  }
+  
+  /* Hide user name on mobile */
+  .user-chip .user-meta {
+    display: none;
+  }
+  
+  .user-chip {
+    padding: 0.15rem 0.2rem;
+    border-radius: 8px;
+  }
+  
+  .user-chip .user-avatar {
+    width: 30px;
+    height: 30px;
+    font-size: 0.65rem;
+  }
+  
+  .user-chip .user-caret {
+    display: none;
+  }
+  
+  .bell-btn {
+    padding: 0.25rem 0.3rem;
+    font-size: 0.9rem;
+    border-radius: 8px;
+  }
+  
+  .theme-toggle {
+    width: 30px;
+    height: 30px;
+    font-size: 0.85rem;
+    border-radius: 8px;
+  }
+  
+  .bell-badge {
+    font-size: 0.5rem;
+    min-width: 0.85rem;
+    padding: 0.05rem 0.2rem;
+    top: -0.2rem;
+    right: -0.2rem;
+  }
+  
+  .bell-dropdown {
+    right: -10px;
+    width: 280px;
+    max-width: calc(100vw - 20px);
+  }
+}
 button:hover, .btn:hover { background: var(--brand-dark); box-shadow: 0 4px 14px rgba(230, 98, 57, 0.28); }
 button:active, .btn:active { transform: translateY(1px); }
 button.secondary, .btn.secondary { background: #eef0f5; color: var(--text); box-shadow: none; }
