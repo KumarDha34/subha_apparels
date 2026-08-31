@@ -9,16 +9,11 @@
   "routes": [
     {
       "src": "/static/(.*)",
-      "dest": "/staticfiles/$1"
+      "dest": "frontend/static/$1"
     },
     {
       "src": "/(.*)",
       "dest": "config/wsgi.py"
     }
-  ],
-  "env": {
-    "DJANGO_SETTINGS_MODULE": "config.settings",
-    "PYTHONPATH": "."
-  },
-  "buildCommand": "python3 manage.py collectstatic --noinput && python3 manage.py migrate --noinput"
+  ]
 }
