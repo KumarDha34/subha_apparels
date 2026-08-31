@@ -1,7 +1,0 @@
-{
-  "name": "subha-apparels",
-  "version": "1.0.0",
-  "scripts": {
-    "vercel-build": "python3 manage.py collectstatic --noinput && python3 manage.py migrate --noinput"
-  }
-}
